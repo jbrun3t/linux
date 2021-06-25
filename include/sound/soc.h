@@ -1349,9 +1349,18 @@ void snd_soc_of_parse_audio_prefix(struct snd_soc_card *card,
 	snd_soc_of_parse_node_prefix(card->dev->of_node,
 				     codec_conf, of_node, propname);
 }
-
+int snd_soc_of_parse_audio_routing_ext(struct snd_soc_card *card,
+				       const char *propname, int *n,
+				       const struct snd_soc_dapm_route **r);
+static inline
 int snd_soc_of_parse_audio_routing(struct snd_soc_card *card,
-				   const char *propname);
+				   const char *propname)
+{
+	return snd_soc_of_parse_audio_routing_ext(card, propname,
+						  &card->num_of_dapm_routes,
+						  &card->of_dapm_routes);
+}
+
 int snd_soc_of_parse_aux_devs(struct snd_soc_card *card, const char *propname);
 
 unsigned int snd_soc_daifmt_clock_provider_flipped(unsigned int dai_fmt);

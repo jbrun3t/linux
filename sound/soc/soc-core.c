@@ -3205,8 +3205,10 @@ void snd_soc_of_parse_node_prefix(struct device_node *np,
 }
 EXPORT_SYMBOL_GPL(snd_soc_of_parse_node_prefix);
 
-int snd_soc_of_parse_audio_routing(struct snd_soc_card *card,
-				   const char *propname)
+int snd_soc_of_parse_audio_routing_ext(struct snd_soc_card *card,
+				       const char *propname,
+				       int *n,
+				       const struct snd_soc_dapm_route **r)
 {
 	struct device_node *np = card->dev->of_node;
 	int num_routes;
@@ -3249,12 +3251,12 @@ int snd_soc_of_parse_audio_routing(struct snd_soc_card *card,
 		}
 	}
 
-	card->num_of_dapm_routes = num_routes;
-	card->of_dapm_routes = routes;
+	*n = num_routes;
+	*r = routes;
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(snd_soc_of_parse_audio_routing);
+EXPORT_SYMBOL_GPL(snd_soc_of_parse_audio_routing_ext);
 
 int snd_soc_of_parse_aux_devs(struct snd_soc_card *card, const char *propname)
 {
