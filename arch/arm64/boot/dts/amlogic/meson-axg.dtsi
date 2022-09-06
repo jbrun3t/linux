@@ -1686,6 +1686,14 @@
 				};
 			};
 
+			rti_sticky_AO: sram@130 {
+				compatible = "mmio-sram";
+				reg = <0x0 0x130 0x0 0x10>;
+				ranges = <0 0x0 0x130 0x10>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+			};
+
 			sec_AO: ao-secure@140 {
 				compatible = "amlogic,meson-gx-ao-secure", "syscon";
 				reg = <0x0 0x140 0x0 0x140>;
