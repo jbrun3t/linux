@@ -9,6 +9,7 @@
 #include "meson-sm1.dtsi"
 #include "meson-khadas-vim3.dtsi"
 #include <dt-bindings/sound/meson-g12a-tohdmitx.h>
+#include <dt-bindings/clock/axg-audio-clkc.h>
 
 / {
 	compatible = "khadas,vim3l", "amlogic,sm1";
@@ -40,26 +41,100 @@
 		regulator-always-on;
 	};
 
+	spdif_dit: audio-codec-100 {
+		#sound-dai-cells = <0>;
+		compatible = "linux,spdif-dit";
+		status = "okay";
+		sound-name-prefix = "DIT";
+	};
+
+	spdif_dir: audio-codec-101 {
+		#sound-dai-cells = <0>;
+		compatible = "linux,spdif-dir";
+		status = "okay";
+		sound-name-prefix = "DIR";
+	};
+
+	i2s_dac: audio-codec-102 {
+		#sound-dai-cells = <0>;
+		compatible = "ess,es9038q2m";
+		status = "okay";
+		sound-name-prefix = "ES9038";
+	};
+
 	sound {
 		model = "G12B-KHADAS-VIM3L";
+		audio-aux-devs = <&tdmin_a>, <&tdmin_b>,
+				 <&tdmout_a>, <&tdmout_b>;
+		audio-widgets = "Line", "Lineout";
 		audio-routing = "TDMOUT_A IN 0", "FRDDR_A OUT 0",
+				"TDMOUT_B IN 0", "FRDDR_A OUT 1",
+				"SPDIFOUT_A IN 0", "FRDDR_A OUT 3",
 				"TDMOUT_A IN 1", "FRDDR_B OUT 0",
+				"TDMOUT_B IN 1", "FRDDR_B OUT 1",
+				"SPDIFOUT_A IN 1", "FRDDR_B OUT 3",
 				"TDMOUT_A IN 2", "FRDDR_C OUT 0",
+				"TDMOUT_B IN 2", "FRDDR_C OUT 1",
+				"SPDIFOUT_A IN 2", "FRDDR_C OUT 3",
 				"TDM_A Playback", "TDMOUT_A OUT",
+				"TDM_B Playback", "TDMOUT_B OUT",
 				"TDMIN_A IN 0", "TDM_A Capture",
+				"TDMIN_A IN 1", "TDM_B Capture",
 				"TDMIN_A IN 13", "TDM_A Loopback",
+				"TDMIN_A IN 14", "TDM_B Loopback",
+				"TDMIN_B IN 0", "TDM_A Capture",
+				"TDMIN_B IN 1", "TDM_B Capture",
+				"TDMIN_B IN 13", "TDM_A Loopback",
+				"TDMIN_B IN 14", "TDM_B Loopback",
 				"TODDR_A IN 0", "TDMIN_A OUT",
 				"TODDR_B IN 0", "TDMIN_A OUT",
 				"TODDR_C IN 0", "TDMIN_A OUT",
+				"TODDR_A IN 1", "TDMIN_B OUT",
+				"TODDR_B IN 1", "TDMIN_B OUT",
+				"TODDR_C IN 1", "TDMIN_B OUT",
+				"TODDR_A IN 3", "SPDIFIN Capture",
+				"TODDR_B IN 3", "SPDIFIN Capture",
+				"TODDR_C IN 3", "SPDIFIN Capture",
 				"TODDR_A IN 11", "EARCRX OUT",
 				"TODDR_B IN 11", "EARCRX OUT",
-				"TODDR_C IN 11", "EARCRX OUT";
+				"TODDR_C IN 11", "EARCRX OUT",
+				"Lineout", "ES9038 DACL",
+				"Lineout", "ES9038 DACR";
 
 		dai-link-8 {
 			sound-dai = <&earcrx>;
 
 			codec {
 				sound-dai = <&earc_dir>;
+			};
+		};
+
+		/* 2ch external on the 40pins headers */
+		dai-link-100 {
+			sound-dai = <&tdmif_b>;
+			dai-format = "i2s";
+			continuous-clock;
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+
+			codec {
+				sound-dai = <&i2s_dac>;
+			};
+
+		};
+
+		dai-link-101 {
+			sound-dai = <&spdifout_a>;
+
+			codec {
+				sound-dai = <&spdif_dit>;
+			};
+		};
+
+		dai-link-102 {
+			sound-dai = <&spdifin>;
+
+			codec {
+				sound-dai = <&spdif_dir>;
 			};
 		};
 	};
@@ -125,5 +200,36 @@
 };
 
 &earcrx {
+	status = "okay";
+};
+
+&spdifin {
+	pinctrl-0 = <&spdif_in_h_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&spdifout_a {
+	pinctrl-0 = <&spdif_ao_out_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&tdmif_b {
+	status = "okay";
+	pinctrl-0 = <&tdm_b_fs_pins>, <&tdm_b_sclk_pins>, <&tdm_b_dout0_pins>;
+	pinctrl-names = "default";
+	assigned-clocks = <&clkc_audio AUD_CLKID_TDM_SCLK_PAD1>,
+			  <&clkc_audio AUD_CLKID_TDM_LRCLK_PAD1>;
+	assigned-clock-parents = <&clkc_audio AUD_CLKID_MST_B_SCLK>,
+				 <&clkc_audio AUD_CLKID_MST_B_LRCLK>;
+	assigned-clock-rates = <0>, <0>;
+};
+
+&tdmin_b {
+	status = "okay";
+};
+
+&tdmout_b {
 	status = "okay";
 };
