@@ -116,6 +116,7 @@ config SND_SOC_ALL_CODECS
 	imply SND_SOC_DA732X
 	imply SND_SOC_DA9055
 	imply SND_SOC_DMIC
+	imply SND_SOC_ESS9038Q2M
 	imply SND_SOC_ES8316
 	imply SND_SOC_ES8323
 	imply SND_SOC_ES8326
@@ -1217,6 +1218,10 @@ config SND_SOC_HDMI_CODEC
 	select SND_PCM_ELD
 	select SND_PCM_IEC958
 	select HDMI
+
+config SND_SOC_ES9038Q2M
+	tristate "ESS ES9038Q2M CODEC stub"
+	select I2C_CHARDEV
 
 config SND_SOC_ES7134
 	tristate "Everest Semi ES7134 CODEC"
