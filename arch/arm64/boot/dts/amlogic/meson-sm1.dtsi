@@ -498,6 +498,31 @@
 		resets = <&clkc_audio AUD_RESET_PDM>;
 		status = "disabled";
 	};
+
+	earcrx: audio-controller@63800 {
+		status = "disabled";
+		compatible = "amlogic,sm1-earcrx";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "EARCRX";
+		interrupts-extended = <&gic GIC_SPI 87 IRQ_TYPE_LEVEL_HIGH>,
+				      <&gpio_intc 30 IRQ_TYPE_EDGE_FALLING>; /* Spy on GPIOH_2 */
+		interrupt-names = "earc", "hpd";
+		reg = <0x0 0x63800 0x0 0x800>;
+
+		clocks = <&clkc_audio AUD_CLKID_EARCRX>,
+			 <&clkc_audio AUD_CLKID_EARCRX_CMDC>,
+			 <&clkc_audio AUD_CLKID_EARCRX_DMAC>;
+		clock-names = "pclk", "cmdc", "dmac";
+
+		io-channels = <&clk_msr 124>;
+		io-channel-names = "earc-pll";
+
+		assigned-clocks = <&clkc_audio AUD_CLKID_EARCRX_CMDC>,
+				  <&clkc_audio AUD_CLKID_EARCRX_DMAC>;
+		assigned-clock-parents = <0>, <0>;
+		assigned-clock-rates = <10000000>,
+				       <500000000>;
+	};
 };
 
 &cecb_AO {
