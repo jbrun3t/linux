@@ -35,6 +35,13 @@
 		sound-name-prefix = "10U2";
 	};
 
+	arcin: audio-codec-0 {
+		#sound-dai-cells = <0>;
+		compatible = "linux,spdif-dir";
+		status = "okay";
+		sound-name-prefix = "10U3";
+	};
+
 	/* TOFIX: handle CVBS_DET on SARADC channel 0 */
 	cvbs-connector {
 		compatible = "composite-video-connector";
@@ -337,6 +344,14 @@
 				sound-dai = <&acodec>;
 			};
 		};
+
+		dai-link-11 {
+			sound-dai = <&spdifin>;
+
+			codec {
+				sound-dai = <&arcin>;
+			};
+		};
 	};
 };
 
@@ -520,6 +535,12 @@
 	mmc-pwrseq = <&emmc_pwrseq>;
 	vmmc-supply = <&vcc_3v3>;
 	vqmmc-supply = <&flash_1v8>;
+};
+
+&spdifin {
+	pinctrl-0 = <&spdif_in_a10_pins>;
+	pinctrl-names = "default";
+	status = "okay";
 };
 
 &spifc {
