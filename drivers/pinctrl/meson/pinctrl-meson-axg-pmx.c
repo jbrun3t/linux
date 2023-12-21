@@ -22,6 +22,7 @@
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/pinctrl/pinmux.h>
 
+#include "../core.h"
 #include "pinctrl-meson.h"
 #include "pinctrl-meson-axg-pmx.h"
 
@@ -104,8 +105,20 @@ static int meson_axg_pmx_request_gpio(struct pinctrl_dev *pcdev,
 			struct pinctrl_gpio_range *range, unsigned int offset)
 {
 	struct meson_pinctrl *pc = pinctrl_dev_get_drvdata(pcdev);
+	struct pin_desc *desc = pin_desc_get(pcdev, offset);
+	int ret = 0;
 
-	return meson_axg_pmx_update_function(pc, offset, 0);
+	/*
+	 * If there is no mux owner, it means the pin has not been opened with
+	 * another function so it fine to set the GPIO mode. Otherwise, it means we
+	 * are trying to open with both a function and gpio, probably to monitor
+	 * the function activity. In such case, leave the function untouched.
+	 * Of course, output gpio direction won't work in such case
+	 */
+	if (!desc->mux_owner)
+		ret = meson_axg_pmx_update_function(pc, offset, 0);
+
+	return ret;
 }
 
 const struct pinmux_ops meson_axg_pmx_ops = {
