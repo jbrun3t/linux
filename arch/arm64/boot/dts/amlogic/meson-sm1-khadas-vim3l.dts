@@ -14,6 +14,13 @@
 	compatible = "khadas,vim3l", "amlogic,sm1";
 	model = "Khadas VIM3L";
 
+	earc_dir: audio-codec-0 {
+		#sound-dai-cells = <0>;
+		compatible = "linux,spdif-dir";
+		status = "okay";
+		sound-name-prefix = "EARC_DIR";
+	};
+
 	vddcpu: regulator-vddcpu {
 		/*
 		 * Silergy SY8030DEC Regulator.
@@ -43,7 +50,18 @@
 				"TDMIN_A IN 13", "TDM_A Loopback",
 				"TODDR_A IN 0", "TDMIN_A OUT",
 				"TODDR_B IN 0", "TDMIN_A OUT",
-				"TODDR_C IN 0", "TDMIN_A OUT";
+				"TODDR_C IN 0", "TDMIN_A OUT",
+				"TODDR_A IN 11", "EARCRX OUT",
+				"TODDR_B IN 11", "EARCRX OUT",
+				"TODDR_C IN 11", "EARCRX OUT";
+
+		dai-link-8 {
+			sound-dai = <&earcrx>;
+
+			codec {
+				sound-dai = <&earc_dir>;
+			};
+		};
 	};
 };
 
@@ -104,4 +122,8 @@
 
 &sd_emmc_a {
 	sd-uhs-sdr50;
+};
+
+&earcrx {
+	status = "okay";
 };
