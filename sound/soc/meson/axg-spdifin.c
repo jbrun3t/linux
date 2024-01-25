@@ -12,6 +12,8 @@
 #include <sound/soc-dai.h>
 #include <sound/pcm_params.h>
 
+#include "axg-spdifin-utils.h"
+
 #define SPDIFIN_CTRL0			0x00
 #define  SPDIFIN_CTRL0_EN		BIT(31)
 #define  SPDIFIN_CTRL0_RST_OUT		BIT(29)
@@ -25,12 +27,8 @@
 #define  SPDIFIN_CTRL1_BASE_TIMER	GENMASK(19, 0)
 #define  SPDIFIN_CTRL1_IRQ_MASK		GENMASK(27, 20)
 #define SPDIFIN_CTRL2			0x08
-#define  SPDIFIN_THRES_PER_REG		3
-#define  SPDIFIN_THRES_WIDTH		10
 #define SPDIFIN_CTRL3			0x0c
 #define SPDIFIN_CTRL4			0x10
-#define  SPDIFIN_TIMER_PER_REG		4
-#define  SPDIFIN_TIMER_WIDTH		8
 #define SPDIFIN_CTRL5			0x14
 #define SPDIFIN_CTRL6			0x18
 #define SPDIFIN_STAT0			0x1c
@@ -73,25 +71,6 @@ struct axg_spdifin {
  * found.
  */
 
-static unsigned int axg_spdifin_get_rate(struct axg_spdifin *priv)
-{
-	unsigned int stat, mode, rate = 0;
-
-	regmap_read(priv->map, SPDIFIN_STAT0, &stat);
-	mode = FIELD_GET(SPDIFIN_STAT0_MODE, stat);
-
-	/*
-	 * If max width is zero, we are not capturing anything.
-	 * Also Sometimes, when the capture is on but there is no data,
-	 * mode is SPDIFIN_MODE_NUM, but not always ...
-	 */
-	if (FIELD_GET(SPDIFIN_STAT0_MAXW, stat) &&
-	    mode < SPDIFIN_MODE_NUM)
-		rate = priv->conf->mode_rates[mode];
-
-	return rate;
-}
-
 static int axg_spdifin_prepare(struct snd_pcm_substream *substream,
 			       struct snd_soc_dai *dai)
 {
@@ -112,54 +91,10 @@ static int axg_spdifin_prepare(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static void axg_spdifin_write_mode_param(struct regmap *map, int mode,
-					 unsigned int val,
-					 unsigned int num_per_reg,
-					 unsigned int base_reg,
-					 unsigned int width)
-{
-	uint64_t offset = mode;
-	unsigned int reg, shift, rem;
-
-	rem = do_div(offset, num_per_reg);
-
-	reg = offset * regmap_get_reg_stride(map) + base_reg;
-	shift = width * (num_per_reg - 1 - rem);
-
-	regmap_update_bits(map, reg, GENMASK(width - 1, 0) << shift,
-			   val << shift);
-}
-
-static void axg_spdifin_write_timer(struct regmap *map, int mode,
-				    unsigned int val)
-{
-	axg_spdifin_write_mode_param(map, mode, val, SPDIFIN_TIMER_PER_REG,
-				     SPDIFIN_CTRL4, SPDIFIN_TIMER_WIDTH);
-}
-
-static void axg_spdifin_write_threshold(struct regmap *map, int mode,
-					unsigned int val)
-{
-	axg_spdifin_write_mode_param(map, mode, val, SPDIFIN_THRES_PER_REG,
-				     SPDIFIN_CTRL2, SPDIFIN_THRES_WIDTH);
-}
-
-static unsigned int axg_spdifin_mode_timer(struct axg_spdifin *priv,
-					   int mode,
-					   unsigned int rate)
-{
-	/*
-	 * Number of period of the reference clock during a period of the
-	 * input signal reference clock
-	 */
-	return rate / (128 * priv->conf->mode_rates[mode]);
-}
-
 static int axg_spdifin_sample_mode_config(struct snd_soc_dai *dai,
 					  struct axg_spdifin *priv)
 {
-	unsigned int rate, t_next;
-	int ret, i = SPDIFIN_MODE_NUM - 1;
+	int ret;
 
 	/* Set spdif input reference clock */
 	ret = clk_set_rate(priv->refclk, priv->conf->ref_rate);
@@ -168,43 +103,13 @@ static int axg_spdifin_sample_mode_config(struct snd_soc_dai *dai,
 		return ret;
 	}
 
-	/*
-	 * The rate actually set might be slightly different, get
-	 * the actual rate for the following mode calculation
-	 */
-	rate = clk_get_rate(priv->refclk);
-
-	/* HW will update mode every 1ms */
-	regmap_update_bits(priv->map, SPDIFIN_CTRL1,
-			   SPDIFIN_CTRL1_BASE_TIMER,
-			   FIELD_PREP(SPDIFIN_CTRL1_BASE_TIMER, rate / 1000));
-
 	/* Threshold based on the maximum width between two edges */
 	regmap_update_bits(priv->map, SPDIFIN_CTRL0,
 			   SPDIFIN_CTRL0_WIDTH_SEL, 0);
 
-	/* Calculate the last timer which has no threshold */
-	t_next = axg_spdifin_mode_timer(priv, i, rate);
-	axg_spdifin_write_timer(priv->map, i, t_next);
-
-	do {
-		unsigned int t;
-
-		i -= 1;
-
-		/* Calculate the timer */
-		t = axg_spdifin_mode_timer(priv, i, rate);
-
-		/* Set the timer value */
-		axg_spdifin_write_timer(priv->map, i, t);
-
-		/* Set the threshold value */
-		axg_spdifin_write_threshold(priv->map, i, 3 * (t + t_next));
-
-		/* Save the current timer for the next threshold calculation */
-		t_next = t;
-
-	} while (i > 0);
+	meson_spdifin_sample_mode_config(priv->map, priv->refclk,
+					 SPDIFIN_CTRL1,
+					 priv->conf->mode_rates);
 
 	return 0;
 }
@@ -259,72 +164,6 @@ static const struct snd_soc_dai_ops axg_spdifin_ops = {
 	.prepare	= axg_spdifin_prepare,
 };
 
-static int axg_spdifin_iec958_info(struct snd_kcontrol *kcontrol,
-				   struct snd_ctl_elem_info *uinfo)
-{
-	uinfo->type = SNDRV_CTL_ELEM_TYPE_IEC958;
-	uinfo->count = 1;
-
-	return 0;
-}
-
-static int axg_spdifin_get_status_mask(struct snd_kcontrol *kcontrol,
-				       struct snd_ctl_elem_value *ucontrol)
-{
-	int i;
-
-	for (i = 0; i < 24; i++)
-		ucontrol->value.iec958.status[i] = 0xff;
-
-	return 0;
-}
-
-static int axg_spdifin_get_status(struct snd_kcontrol *kcontrol,
-				  struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
-	struct axg_spdifin *priv = snd_soc_component_get_drvdata(c);
-	int i, j;
-
-	for (i = 0; i < 6; i++) {
-		unsigned int val;
-
-		regmap_update_bits(priv->map, SPDIFIN_CTRL0,
-				   SPDIFIN_CTRL0_STATUS_SEL,
-				   FIELD_PREP(SPDIFIN_CTRL0_STATUS_SEL, i));
-
-		regmap_read(priv->map, SPDIFIN_STAT1, &val);
-
-		for (j = 0; j < 4; j++) {
-			unsigned int offset = i * 4 + j;
-
-			ucontrol->value.iec958.status[offset] =
-				(val >> (j * 8)) & 0xff;
-		}
-	}
-
-	return 0;
-}
-
-#define AXG_SPDIFIN_IEC958_MASK						\
-	{								\
-		.access = SNDRV_CTL_ELEM_ACCESS_READ,			\
-		.iface = SNDRV_CTL_ELEM_IFACE_PCM,			\
-		.name = SNDRV_CTL_NAME_IEC958("", CAPTURE, MASK),	\
-		.info = axg_spdifin_iec958_info,			\
-		.get = axg_spdifin_get_status_mask,			\
-	}
-
-#define AXG_SPDIFIN_IEC958_STATUS					\
-	{								\
-		.access = (SNDRV_CTL_ELEM_ACCESS_READ |			\
-			   SNDRV_CTL_ELEM_ACCESS_VOLATILE),		\
-		.iface = SNDRV_CTL_ELEM_IFACE_PCM,			\
-		.name =	SNDRV_CTL_NAME_IEC958("", CAPTURE, NONE),	\
-		.info = axg_spdifin_iec958_info,			\
-		.get = axg_spdifin_get_status,				\
-	}
-
 static const char * const spdifin_chsts_src_texts[] = {
 	"A", "B",
 };
@@ -350,7 +189,9 @@ static int axg_spdifin_rate_lock_get(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
 	struct axg_spdifin *priv = snd_soc_component_get_drvdata(c);
 
-	ucontrol->value.integer.value[0] = axg_spdifin_get_rate(priv);
+	ucontrol->value.integer.value[0] =
+		meson_spdifin_get_rate(priv->map, SPDIFIN_STAT0,
+				       priv->conf->mode_rates);
 
 	return 0;
 }
@@ -370,8 +211,10 @@ static const struct snd_kcontrol_new axg_spdifin_controls[] = {
 	SOC_DOUBLE("Capture Switch", SPDIFIN_CTRL0, 7, 6, 1, 1),
 	SOC_ENUM(SNDRV_CTL_NAME_IEC958("", CAPTURE, NONE) "Src",
 		 axg_spdifin_chsts_src_enum),
-	AXG_SPDIFIN_IEC958_MASK,
-	AXG_SPDIFIN_IEC958_STATUS,
+	MESON_SPDIFIN_IEC958_MASK(""),
+	MESON_SPDIFIN_IEC958_STATUS("", SPDIFIN_CTRL0,
+				    SPDIFIN_CTRL0_STATUS_SEL,
+				    SPDIFIN_STAT1),
 };
 
 static const struct snd_soc_component_driver axg_spdifin_component_drv = {
