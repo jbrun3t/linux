@@ -2421,7 +2421,7 @@ static struct clk_regmap gxbb_hdmi_sel = {
 		.ops = &clk_regmap_mux_ops,
 		.parent_data = gxbb_hdmi_parent_data,
 		.num_parents = ARRAY_SIZE(gxbb_hdmi_parent_data),
-		.flags = CLK_SET_RATE_NO_REPARENT | CLK_GET_RATE_NOCACHE,
+		.flags = CLK_SET_RATE_NO_REPARENT,
 	},
 };
 
@@ -2436,7 +2436,7 @@ static struct clk_regmap gxbb_hdmi_div = {
 		.ops = &clk_regmap_divider_ops,
 		.parent_hws = (const struct clk_hw *[]) { &gxbb_hdmi_sel.hw },
 		.num_parents = 1,
-		.flags = CLK_GET_RATE_NOCACHE,
+		.flags = CLK_SET_RATE_PARENT,
 	},
 };
 
@@ -2450,7 +2450,7 @@ static struct clk_regmap gxbb_hdmi = {
 		.ops = &clk_regmap_gate_ops,
 		.parent_hws = (const struct clk_hw *[]) { &gxbb_hdmi_div.hw },
 		.num_parents = 1,
-		.flags = CLK_SET_RATE_PARENT | CLK_IGNORE_UNUSED,
+		.flags = CLK_SET_RATE_PARENT,
 	},
 };
 
