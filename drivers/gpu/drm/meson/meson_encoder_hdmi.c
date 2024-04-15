@@ -45,6 +45,12 @@ struct meson_encoder_hdmi {
 	struct cec_notifier *cec_notifier;
 };
 
+enum meson_venc_source {
+	MESON_VENC_SOURCE_NONE = 0,
+	MESON_VENC_SOURCE_ENCI = 1,
+	MESON_VENC_SOURCE_ENCP = 2,
+};
+
 #define bridge_to_meson_encoder_hdmi(x) \
 	container_of(x, struct meson_encoder_hdmi, bridge)
 
@@ -247,6 +253,14 @@ static void meson_encoder_hdmi_atomic_enable(struct drm_bridge *bridge,
 		writel_relaxed(1, priv->io_base + _REG(ENCI_VIDEO_EN));
 	else
 		writel_relaxed(1, priv->io_base + _REG(ENCP_VIDEO_EN));
+
+	/* Enable and Select HDMI video source for HDMI-TX */
+	if (priv->venc.hdmi_use_enci)
+		writel_bits_relaxed(0x3, MESON_VENC_SOURCE_ENCI,
+				    priv->io_base + _REG(VPU_HDMI_SETTING));
+	else
+		writel_bits_relaxed(0x3, MESON_VENC_SOURCE_ENCP,
+				    priv->io_base + _REG(VPU_HDMI_SETTING));
 }
 
 static void meson_encoder_hdmi_atomic_disable(struct drm_bridge *bridge,
@@ -256,6 +270,8 @@ static void meson_encoder_hdmi_atomic_disable(struct drm_bridge *bridge,
 	struct meson_drm *priv = encoder_hdmi->priv;
 
 	writel_bits_relaxed(0x3, 0,
+			    priv->io_base + _REG(VPU_HDMI_SETTING));
+	writel_bits_relaxed(0xf << 8, 0,
 			    priv->io_base + _REG(VPU_HDMI_SETTING));
 
 	writel_relaxed(0, priv->io_base + _REG(ENCI_VIDEO_EN));

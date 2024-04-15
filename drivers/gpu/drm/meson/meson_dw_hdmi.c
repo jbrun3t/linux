@@ -115,12 +115,6 @@
 
 static DEFINE_SPINLOCK(reg_lock);
 
-enum meson_venc_source {
-	MESON_VENC_SOURCE_NONE = 0,
-	MESON_VENC_SOURCE_ENCI = 1,
-	MESON_VENC_SOURCE_ENCP = 2,
-};
-
 struct meson_dw_hdmi;
 
 struct meson_dw_hdmi_data {
@@ -376,8 +370,6 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	struct meson_dw_hdmi *dw_hdmi = (struct meson_dw_hdmi *)data;
 	bool is_hdmi2_sink = display->hdmi.scdc.supported;
 	struct meson_drm *priv = dw_hdmi->priv;
-	unsigned int wr_clk =
-		readl_relaxed(priv->io_base + _REG(VPU_HDMI_SETTING));
 	bool mode_is_420 = false;
 
 	DRM_DEBUG_DRIVER("\"%s\" div%d\n", mode->name,
@@ -420,36 +412,6 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	meson_dw_hdmi_phy_reset(dw_hdmi);
 	meson_dw_hdmi_phy_reset(dw_hdmi);
 	meson_dw_hdmi_phy_reset(dw_hdmi);
-
-	/* Temporary Disable VENC video stream */
-	if (priv->venc.hdmi_use_enci)
-		writel_relaxed(0, priv->io_base + _REG(ENCI_VIDEO_EN));
-	else
-		writel_relaxed(0, priv->io_base + _REG(ENCP_VIDEO_EN));
-
-	/* Temporary Disable HDMI video stream to HDMI-TX */
-	writel_bits_relaxed(0x3, 0,
-			    priv->io_base + _REG(VPU_HDMI_SETTING));
-	writel_bits_relaxed(0xf << 8, 0,
-			    priv->io_base + _REG(VPU_HDMI_SETTING));
-
-	/* Re-Enable VENC video stream */
-	if (priv->venc.hdmi_use_enci)
-		writel_relaxed(1, priv->io_base + _REG(ENCI_VIDEO_EN));
-	else
-		writel_relaxed(1, priv->io_base + _REG(ENCP_VIDEO_EN));
-
-	/* Push back HDMI clock settings */
-	writel_bits_relaxed(0xf << 8, wr_clk & (0xf << 8),
-			    priv->io_base + _REG(VPU_HDMI_SETTING));
-
-	/* Enable and Select HDMI video source for HDMI-TX */
-	if (priv->venc.hdmi_use_enci)
-		writel_bits_relaxed(0x3, MESON_VENC_SOURCE_ENCI,
-				    priv->io_base + _REG(VPU_HDMI_SETTING));
-	else
-		writel_bits_relaxed(0x3, MESON_VENC_SOURCE_ENCP,
-				    priv->io_base + _REG(VPU_HDMI_SETTING));
 
 	return 0;
 }
