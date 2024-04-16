@@ -28,6 +28,7 @@
  *     0=Release from reset. Default 1.
  */
 #define HDMITX_TOP_SW_RESET                     (0x000)
+#define  TOP_RST_EN				GENMASK(4, 0)
 
 /*
  * Bit 31 RW free_clk_en: 0=Enable clock gating for power saving; 1= Disable
@@ -45,7 +46,8 @@
  * Bit 1 RW tmds_clk_en: 1=enable tmds_clk;  0=disable. Default 0.
  * Bit 0 RW pixel_clk_en: 1=enable pixel_clk; 0=disable. Default 0.
  */
-#define HDMITX_TOP_CLK_CNTL                     (0x001)
+#define HDMITX_TOP_CLK_CNTL                     (0x004)
+#define  TOP_CLK_EN				GENMASK(7, 0)
 
 /*
  * Bit 31:28 RW rxsense_glitch_width: starting from G12A
@@ -53,7 +55,9 @@
  * Bit 11: 0 RW hpd_valid_width: filter out width <= M*1024.    Default 0.
  * Bit 15:12 RW hpd_glitch_width: filter out glitch <= N.       Default 0.
  */
-#define HDMITX_TOP_HPD_FILTER                   (0x002)
+#define HDMITX_TOP_HPD_FILTER                   (0x008)
+#define  TOP_HPD_GLITCH_WIDTH			GENMASK(15, 12)
+#define  TOP_HPD_VALID_WIDTH			GENMASK(11, 0)
 
 /*
  * intr_maskn: MASK_N, one bit per interrupt source.
@@ -67,7 +71,7 @@
  * [  1] hpd_rise_intr
  * [  0] core_intr
  */
-#define HDMITX_TOP_INTR_MASKN                   (0x003)
+#define HDMITX_TOP_INTR_MASKN                   (0x00c)
 
 /*
  * Bit 30: 0 RW intr_stat: For each bit, write 1 to manually set the interrupt
@@ -80,7 +84,7 @@
  * Bit     1 RW hpd_rise
  * Bit     0 RW IP interrupt
  */
-#define HDMITX_TOP_INTR_STAT                    (0x004)
+#define HDMITX_TOP_INTR_STAT                    (0x010)
 
 /*
  * [7]    rxsense_fall starting from G12A
@@ -92,13 +96,12 @@
  * [1]	  hpd_rise
  * [0]	  core_intr_rise
  */
-#define HDMITX_TOP_INTR_STAT_CLR                (0x005)
-
-#define HDMITX_TOP_INTR_CORE		BIT(0)
-#define HDMITX_TOP_INTR_HPD_RISE	BIT(1)
-#define HDMITX_TOP_INTR_HPD_FALL	BIT(2)
-#define HDMITX_TOP_INTR_RXSENSE_RISE	BIT(6)
-#define HDMITX_TOP_INTR_RXSENSE_FALL	BIT(7)
+#define HDMITX_TOP_INTR_STAT_CLR                (0x014)
+#define  TOP_INTR_CORE				BIT(0)
+#define  TOP_INTR_HPD_RISE			BIT(1)
+#define  TOP_INTR_HPD_FALL			BIT(2)
+#define  TOP_INTR_RXSENSE_RISE			BIT(6)
+#define  TOP_INTR_RXSENSE_FALL			BIT(7)
 
 /*
  * Bit 14:12 RW tmds_sel: 3'b000=Output zero; 3'b001=Output normal TMDS data;
@@ -112,29 +115,31 @@
  *     2=Output 1-bit pattern; 3=output 10-bit pattern. Default 0.
  * Bit 0 RW prbs_pttn_en: 1=Enable PRBS generator; 0=Disable. Default 0.
  */
-#define HDMITX_TOP_BIST_CNTL                    (0x006)
+#define HDMITX_TOP_BIST_CNTL                    (0x018)
+#define  TOP_BIST_OUT_MASK			GENMASK(14, 12)
+#define  TOP_BIST_TMDS_EN			BIT(12)
 
 /* Bit 29:20 RW shift_pttn_data[59:50]. Default 0. */
 /* Bit 19:10 RW shift_pttn_data[69:60]. Default 0. */
 /* Bit  9: 0 RW shift_pttn_data[79:70]. Default 0. */
-#define HDMITX_TOP_SHIFT_PTTN_012               (0x007)
+#define HDMITX_TOP_SHIFT_PTTN_012               (0x01c)
 
 /* Bit 29:20 RW shift_pttn_data[29:20]. Default 0. */
 /* Bit 19:10 RW shift_pttn_data[39:30]. Default 0. */
 /* Bit  9: 0 RW shift_pttn_data[49:40]. Default 0. */
-#define HDMITX_TOP_SHIFT_PTTN_345               (0x008)
+#define HDMITX_TOP_SHIFT_PTTN_345               (0x020)
 
 /* Bit 19:10 RW shift_pttn_data[ 9: 0]. Default 0. */
 /* Bit  9: 0 RW shift_pttn_data[19:10]. Default 0. */
-#define HDMITX_TOP_SHIFT_PTTN_67                (0x009)
+#define HDMITX_TOP_SHIFT_PTTN_67                (0x024)
 
 /* Bit 25:16 RW tmds_clk_pttn[19:10]. Default 0. */
 /* Bit  9: 0 RW tmds_clk_pttn[ 9: 0]. Default 0. */
-#define HDMITX_TOP_TMDS_CLK_PTTN_01             (0x00A)
+#define HDMITX_TOP_TMDS_CLK_PTTN_01             (0x028)
 
 /* Bit 25:16 RW tmds_clk_pttn[39:30]. Default 0. */
 /* Bit  9: 0 RW tmds_clk_pttn[29:20]. Default 0. */
-#define HDMITX_TOP_TMDS_CLK_PTTN_23             (0x00B)
+#define HDMITX_TOP_TMDS_CLK_PTTN_23             (0x02c)
 
 /*
  * Bit 1 RW shift_tmds_clk_pttn:1=Enable shifting clk pattern,
@@ -143,18 +148,22 @@
  * [	1] shift_tmds_clk_pttn
  * [	0] load_tmds_clk_pttn
  */
-#define HDMITX_TOP_TMDS_CLK_PTTN_CNTL           (0x00C)
+#define HDMITX_TOP_TMDS_CLK_PTTN_CNTL           (0x030)
+#define  TOP_TDMS_CLK_PTTN_LOAD			BIT(0)
+#define  TOP_TDMS_CLK_PTTN_SHFT			BIT(1)
 
 /*
  * Bit 0 RW revocmem_wr_fail: Read back 1 to indicate Host write REVOC MEM
  * failure, write 1 to clear the failure flag.  Default 0.
  */
-#define HDMITX_TOP_REVOCMEM_STAT                (0x00D)
+#define HDMITX_TOP_REVOCMEM_STAT                (0x034)
 
 /*
  * Bit	   1 R	filtered RxSense status
  * Bit     0 R  filtered HPD status.
  */
-#define HDMITX_TOP_STAT0                        (0x00E)
+#define HDMITX_TOP_STAT0                        (0x038)
+#define  TOP_STAT0_HPD				BIT(0)
+#define  TOP_STAT0_RXSENSE			BIT(1)
 
 #endif /* __MESON_DW_HDMI_H */
