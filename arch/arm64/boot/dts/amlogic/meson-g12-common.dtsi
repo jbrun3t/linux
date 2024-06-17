@@ -2384,9 +2384,12 @@
 				clocks = <&clkc CLKID_I2C>;
 			};
 
-			clk_msr: clock-measure@18000 {
-				compatible = "amlogic,meson-g12a-clk-measure";
-				reg = <0x0 0x18000 0x0 0x10>;
+			clk_msr: rate-sensor@18000 {
+				compatible = "amlogic,g12a-clk-msr-io";
+				reg = <0x0 0x18004 0x0 0xc>,
+				      <0x0 0x18000 0x0 0x4>;
+				reg-names = "reg", "duty";
+				#io-channel-cells = <1>;
 			};
 
 			uart_C: serial@22000 {

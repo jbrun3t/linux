@@ -505,7 +505,7 @@
 };
 
 &clk_msr {
-	compatible = "amlogic,meson-sm1-clk-measure";
+	compatible = "amlogic,sm1-clk-msr-io";
 };
 
 

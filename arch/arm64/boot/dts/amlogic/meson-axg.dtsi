@@ -1878,9 +1878,12 @@
 				status = "disabled";
 			};
 
-			clk_msr: clock-measure@18000 {
-				compatible = "amlogic,meson-axg-clk-measure";
-				reg = <0x0 0x18000 0x0 0x10>;
+			clk_msr: rate-sensor@18000 {
+				compatible = "amlogic,axg-clk-msr-io";
+				reg = <0x0 0x18004 0x0 0xc>,
+				      <0x0 0x18000 0x0 0x4>;
+				reg-names = "reg", "duty";
+				#io-channel-cells = <1>;
 			};
 
 			i2c3: i2c@1c000 {
