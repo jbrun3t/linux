@@ -290,12 +290,28 @@ static int axg_spdifin_component_probe(struct snd_soc_component *component)
 				     SND_JACK_LINEIN, &priv->jack);
 }
 
-static const struct snd_soc_dai_ops axg_spdifin_ops = {
+static const struct snd_soc_dai_ops axg_spdifin_dai_ops = {
 	.probe		= axg_spdifin_dai_probe,
 	.remove		= axg_spdifin_dai_remove,
 	.startup	= axg_spdifin_dai_startup,
 	.shutdown	= axg_spdifin_dai_shutdown,
 	.prepare	= axg_spdifin_dai_prepare,
+};
+
+static struct snd_soc_dai_driver axg_spdifin_dai_driver[] = {
+	{
+		.name = "SPDIF Input",
+		.capture = {
+			.stream_name	= "Capture",
+			.channels_min	= 2,
+			.channels_max	= 2,
+			.rate_min	= 32000,
+			.rate_max	= 192000,
+			.rates		= SNDRV_PCM_RATE_KNOT,
+			.formats	= SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE,
+		},
+		.ops = &axg_spdifin_dai_ops,
+	},
 };
 
 static const char * const spdifin_chsts_src_texts[] = {
@@ -395,41 +411,10 @@ static const struct of_device_id axg_spdifin_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, axg_spdifin_of_match);
 
-static struct snd_soc_dai_driver *
-axg_spdifin_get_dai_drv(struct device *dev, struct axg_spdifin *priv)
-{
-	struct snd_soc_dai_driver *drv;
-	int i;
-
-	drv = devm_kzalloc(dev, sizeof(*drv), GFP_KERNEL);
-	if (!drv)
-		return ERR_PTR(-ENOMEM);
-
-	drv->name = "SPDIF Input";
-	drv->ops = &axg_spdifin_ops;
-	drv->capture.stream_name = "Capture";
-	drv->capture.channels_min = 1;
-	drv->capture.channels_max = 2;
-	drv->capture.formats = SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE;
-
-	for (i = 0; i < SPDIFIN_MODE_NUM; i++) {
-		unsigned int rb =
-			snd_pcm_rate_to_rate_bit(priv->conf->mode_rates[i]);
-
-		if (rb == SNDRV_PCM_RATE_KNOT)
-			return ERR_PTR(-EINVAL);
-
-		drv->capture.rates |= rb;
-	}
-
-	return drv;
-}
-
 static int axg_spdifin_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct axg_spdifin *priv;
-	struct snd_soc_dai_driver *dai_drv;
 	void __iomem *regs;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -470,15 +455,8 @@ static int axg_spdifin_probe(struct platform_device *pdev)
 
 	mutex_init(&priv->lock);
 
-	dai_drv = axg_spdifin_get_dai_drv(dev, priv);
-	if (IS_ERR(dai_drv)) {
-		dev_err(dev, "failed to get dai driver: %ld\n",
-			PTR_ERR(dai_drv));
-		return PTR_ERR(dai_drv);
-	}
-
 	return devm_snd_soc_register_component(dev, &axg_spdifin_component_drv,
-					       dai_drv, 1);
+					       axg_spdifin_dai_driver, 1);
 }
 
 static struct platform_driver axg_spdifin_pdrv = {
