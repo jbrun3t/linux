@@ -12,6 +12,38 @@
 #include "axg-spdifin-utils.h"
 
 /*
+ * FIXME: DPCM stop helper.
+ * snd_pcm_stop() can't be called from a dpcm backend.
+ * Ideally, a driver should not have to account for that. A proper support
+ * might be to walk the DAPM to (all) the user facing interface.
+ * Let's keep it simple for now a improve this later
+ */
+int snd_soc_dpcm_be_stop(struct snd_pcm_substream *substream,
+			 snd_pcm_state_t state)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_pcm_substream *fe_substream;
+	struct snd_soc_dpcm *dpcm;
+	int dir = substream->stream;
+	int ret, err = 0;
+
+	for_each_dpcm_fe(rtd, dir, dpcm) {
+		fe_substream = snd_soc_dpcm_get_substream(dpcm->fe, dir);
+		ret = snd_pcm_stop(fe_substream, state);
+
+		/*
+		 * Don't stop on error. It might leave an FE running.
+		 * Return the last non zero error code, if any
+		 */
+		if (ret)
+			err = ret;
+	}
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(snd_soc_dpcm_be_stop);
+
+/*
  * the ARC path of the ARC/eARC IP is very similar to the SPDIF input HW
  * It is very likely the HW was copied and quickly adapted for ARC.
  * As a consequence, several tasks, like setting timers, thresholds or

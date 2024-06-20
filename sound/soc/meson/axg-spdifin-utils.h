@@ -6,14 +6,15 @@
 #ifndef _MESON_AXG_SPDIFIN_UTILS_H
 #define _MESON_AXG_SPDIFIN_UTILS_H
 
-#define SPDIFIN_MODE_NUM 7
+#include <sound/soc.h>
 
 struct clk;
 struct regmap;
 
-struct snd_kcontrol;
-struct snd_ctl_elem_info;
-struct snd_ctl_elem_value;
+#define SPDIFIN_MODE_NUM 7
+
+int snd_soc_dpcm_be_stop(struct snd_pcm_substream *substream,
+			 snd_pcm_state_t state);
 
 struct meson_spdifin_chsts_control {
 	unsigned int sel_reg;
