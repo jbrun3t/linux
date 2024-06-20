@@ -6,8 +6,10 @@
 #include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/module.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
+#include <sound/jack.h>
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
 #include <sound/pcm_params.h>
@@ -18,6 +20,7 @@
 #define  SPDIFIN_CTRL0_EN		BIT(31)
 #define  SPDIFIN_CTRL0_RST_OUT		BIT(29)
 #define  SPDIFIN_CTRL0_RST_IN		BIT(28)
+#define  SPDIFIN_CTRL0_AXG_IRQ_CLR	BIT(26)
 #define  SPDIFIN_CTRL0_WIDTH_SEL	BIT(24)
 #define  SPDIFIN_CTRL0_STATUS_CH_SHIFT	11
 #define  SPDIFIN_CTRL0_STATUS_SEL	GENMASK(10, 8)
@@ -31,20 +34,30 @@
 #define SPDIFIN_CTRL4			0x10
 #define SPDIFIN_CTRL5			0x14
 #define SPDIFIN_CTRL6			0x18
+#define  SPDIFIN_CTRL6_G12_IRQ_CLR	GENMASK(23, 16)
 #define SPDIFIN_STAT0			0x1c
-#define  SPDIFIN_STAT0_MODE		GENMASK(30, 28)
-#define  SPDIFIN_STAT0_MAXW		GENMASK(17, 8)
 #define  SPDIFIN_STAT0_IRQ		GENMASK(7, 0)
+#define  SPDIFIN_IRQ_VALID_CHANGED	BIT(6)
+#define  SPDIFIN_IRQ_CSW_CHANGED	BIT(3)
 #define  SPDIFIN_IRQ_MODE_CHANGED	BIT(2)
+#define  SPDIFIN_IRQ_PARITY_ERR		BIT(1)
+#define  SPDIFIN_IRQ_OVERFLOW		BIT(0)
 #define SPDIFIN_STAT1			0x20
 #define SPDIFIN_STAT2			0x24
 #define SPDIFIN_MUTE_VAL		0x28
+
+#define SPDIFIN_IRQS (SPDIFIN_IRQ_VALID_CHANGED | \
+		      SPDIFIN_IRQ_CSW_CHANGED |	  \
+		      SPDIFIN_IRQ_MODE_CHANGED |  \
+		      SPDIFIN_IRQ_PARITY_ERR |	  \
+		      SPDIFIN_IRQ_OVERFLOW)
 
 #define SPDIFIN_MODE_NUM		7
 
 struct axg_spdifin_cfg {
 	const unsigned int *mode_rates;
 	unsigned int ref_rate;
+	irq_handler_t isr;
 };
 
 struct axg_spdifin {
@@ -52,26 +65,82 @@ struct axg_spdifin {
 	struct regmap *map;
 	struct clk *refclk;
 	struct clk *pclk;
+	struct mutex lock;
+	struct snd_pcm_substream *substream;
+	struct snd_soc_jack jack;
+	unsigned int rate;
+	int irq;
 };
 
-/*
- * TODO:
- * It would have been nice to check the actual rate against the sample rate
- * requested in hw_params(). Unfortunately, I was not able to make the mode
- * detection and IRQ work reliably:
- *
- * 1. IRQs are generated on mode change only, so there is no notification
- *    on transition between no signal and mode 0 (32kHz).
- * 2. Mode detection very often has glitches, and may detects the
- *    lowest or the highest mode before zeroing in on the actual mode.
- *
- * This makes calling snd_pcm_stop() difficult to get right. Even notifying
- * the kcontrol would be very unreliable at this point.
- * Let's keep things simple until the magic spell that makes this work is
- * found.
- */
+static irqreturn_t axg_spdifin_isr(int irq, void *dev_id)
+{
+	struct snd_soc_dai *dai = dev_id;
+	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
 
-static int axg_spdifin_prepare(struct snd_pcm_substream *substream,
+	/* Clear all IRQs with a single bit on axg */
+	regmap_update_bits(priv->map, SPDIFIN_CTRL0,
+			   SPDIFIN_CTRL0_AXG_IRQ_CLR,
+			   SPDIFIN_CTRL0_AXG_IRQ_CLR);
+	regmap_update_bits(priv->map, SPDIFIN_CTRL0,
+			   SPDIFIN_CTRL0_AXG_IRQ_CLR,
+			   0);	
+
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t g12_spdifin_isr(int irq, void *dev_id)
+{
+	struct snd_soc_dai *dai = dev_id;
+	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
+	unsigned int mask;
+
+	/* From G12 on, the each IRQs are cleared individually */
+	regmap_read(priv->map, SPDIFIN_STAT0, &mask);
+	mask = FIELD_GET(SPDIFIN_STAT0_IRQ, mask);
+
+	regmap_update_bits(priv->map, SPDIFIN_CTRL6,
+			   SPDIFIN_CTRL6_G12_IRQ_CLR,
+			   FIELD_PREP(SPDIFIN_CTRL6_G12_IRQ_CLR,
+				      mask));
+
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t axg_spdifin_isr_thread(int irq, void *dev_id)
+{
+	struct snd_soc_dai *dai = dev_id;
+	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
+	unsigned int rate;
+	bool valid_change;
+
+	mutex_lock(&priv->lock);
+	rate = meson_spdifin_get_rate(priv->map, SPDIFIN_STAT0,
+				    priv->conf->mode_rates);
+
+	/* Check if the rate validity changed */
+	valid_change = !!priv->rate != !!rate;
+	
+	/*
+	 * If the stream rate changes while capturing, capture must
+	 * restart to reset the constraints on the stream
+	 */
+	if ((priv->rate != rate) && priv->substream) {
+		snd_soc_dpcm_be_stop(priv->substream, SNDRV_PCM_STATE_DISCONNECTED);
+		priv->substream = NULL;
+	}
+
+	priv->rate = rate;
+	mutex_unlock(&priv->lock);
+
+	if (valid_change)
+		snd_soc_jack_report(&priv->jack,
+				    rate ? SND_JACK_LINEIN : 0,
+				    SND_JACK_LINEIN);
+
+	return IRQ_HANDLED;
+}
+
+static int axg_spdifin_dai_prepare(struct snd_pcm_substream *substream,
 			       struct snd_soc_dai *dai)
 {
 	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
@@ -90,6 +159,41 @@ static int axg_spdifin_prepare(struct snd_pcm_substream *substream,
 
 	return 0;
 }
+
+static int axg_spdifin_dai_startup(struct snd_pcm_substream *substream,
+				   struct snd_soc_dai *dai)
+{
+	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
+	int ret = 0;
+
+        guard(mutex)(&priv->lock);
+
+	/* Only allow start if a rate is locked from ARC or eARC */
+	if (!priv->rate)
+	        return -EIO;
+
+	/* Save substream to stop from IRQ if necessary */
+	priv->substream = substream;
+
+	/* Only support the rate provided by the source */
+	ret = snd_pcm_hw_constraint_single(substream->runtime,
+					   SNDRV_PCM_HW_PARAM_RATE,
+					   priv->rate);
+	if (ret < 0)
+		dev_err(dai->dev, "can't set SPDIF input rate constraint\n");
+
+	return ret;
+}
+
+static void axg_spdifin_dai_shutdown(struct snd_pcm_substream *substream,
+				     struct snd_soc_dai *dai)
+{
+	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
+
+	guard(mutex)(&priv->lock);
+	priv->substream = NULL;
+}
+
 
 static int axg_spdifin_sample_mode_config(struct snd_soc_dai *dai,
 					  struct axg_spdifin *priv)
@@ -119,10 +223,18 @@ static int axg_spdifin_dai_probe(struct snd_soc_dai *dai)
 	struct axg_spdifin *priv = snd_soc_dai_get_drvdata(dai);
 	int ret;
 
+	ret = request_threaded_irq(priv->irq, priv->conf->isr,
+				   axg_spdifin_isr_thread,
+				   IRQF_ONESHOT, "spdifin", dai);
+	if (ret) {
+		dev_err(dai->dev, "failed to install isr");
+		return ret;
+	}
+
 	ret = clk_prepare_enable(priv->pclk);
 	if (ret) {
 		dev_err(dai->dev, "failed to enable pclk\n");
-		return ret;
+		goto irq_err;
 	}
 
 	ret = axg_spdifin_sample_mode_config(dai, priv);
@@ -138,6 +250,15 @@ static int axg_spdifin_dai_probe(struct snd_soc_dai *dai)
 		goto pclk_err;
 	}
 
+	/* Initially report JACK is disconnected */
+	snd_soc_jack_report(&priv->jack, 0, SND_JACK_LINEIN);
+
+	/* Enable IRQs */
+	regmap_update_bits(priv->map, SPDIFIN_CTRL1,
+			   SPDIFIN_CTRL1_IRQ_MASK,
+			   FIELD_PREP(SPDIFIN_CTRL1_IRQ_MASK,
+				      SPDIFIN_IRQS));
+
 	regmap_update_bits(priv->map, SPDIFIN_CTRL0, SPDIFIN_CTRL0_EN,
 			   SPDIFIN_CTRL0_EN);
 
@@ -145,6 +266,8 @@ static int axg_spdifin_dai_probe(struct snd_soc_dai *dai)
 
 pclk_err:
 	clk_disable_unprepare(priv->pclk);
+irq_err:
+	free_irq(priv->irq, dai);
 	return ret;
 }
 
@@ -158,10 +281,21 @@ static int axg_spdifin_dai_remove(struct snd_soc_dai *dai)
 	return 0;
 }
 
+static int axg_spdifin_component_probe(struct snd_soc_component *component)
+{
+	struct axg_spdifin *priv = snd_soc_component_get_drvdata(component);
+
+	/* Insert SPDIF input jack in the card */
+	return snd_soc_card_jack_new(component->card, "SPDIF Input Jack",
+				     SND_JACK_LINEIN, &priv->jack);
+}
+
 static const struct snd_soc_dai_ops axg_spdifin_ops = {
 	.probe		= axg_spdifin_dai_probe,
 	.remove		= axg_spdifin_dai_remove,
-	.prepare	= axg_spdifin_prepare,
+	.startup	= axg_spdifin_dai_startup,
+	.shutdown	= axg_spdifin_dai_shutdown,
+	.prepare	= axg_spdifin_dai_prepare,
 };
 
 static const char * const spdifin_chsts_src_texts[] = {
@@ -218,6 +352,7 @@ static const struct snd_kcontrol_new axg_spdifin_controls[] = {
 };
 
 static const struct snd_soc_component_driver axg_spdifin_component_drv = {
+	.probe			= axg_spdifin_component_probe,
 	.controls		= axg_spdifin_controls,
 	.num_controls		= ARRAY_SIZE(axg_spdifin_controls),
 	.legacy_dai_naming	= 1,
@@ -237,12 +372,25 @@ static const unsigned int axg_spdifin_mode_rates[SPDIFIN_MODE_NUM] = {
 static const struct axg_spdifin_cfg axg_cfg = {
 	.mode_rates = axg_spdifin_mode_rates,
 	.ref_rate = 333333333,
+	.isr = axg_spdifin_isr,
+};
+
+static const struct axg_spdifin_cfg g12_cfg = {
+	.mode_rates = axg_spdifin_mode_rates,
+	.ref_rate = 333333333,
+	.isr = g12_spdifin_isr,
 };
 
 static const struct of_device_id axg_spdifin_of_match[] = {
 	{
 		.compatible = "amlogic,axg-spdifin",
 		.data = &axg_cfg,
+	}, {
+		.compatible = "amlogic,g12-spdifin",
+		.data = &g12_cfg,
+	}, {
+		.compatible = "amlogic,sm1-spdifin",
+		.data = &g12_cfg,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_spdifin_of_match);
@@ -313,6 +461,14 @@ static int axg_spdifin_probe(struct platform_device *pdev)
 	priv->refclk = devm_clk_get(dev, "refclk");
 	if (IS_ERR(priv->refclk))
 		return dev_err_probe(dev, PTR_ERR(priv->refclk), "failed to get mclk\n");
+
+	priv->irq = of_irq_get(dev->of_node, 0);
+	if (priv->irq <= 0) {
+		dev_err(dev, "failed to get irq: %d\n", priv->irq);
+		return priv->irq;
+	}
+
+	mutex_init(&priv->lock);
 
 	dai_drv = axg_spdifin_get_dai_drv(dev, priv);
 	if (IS_ERR(dai_drv)) {
