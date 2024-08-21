@@ -379,19 +379,6 @@ static int cmdc_get_state(struct sm1_earcrx *ed)
 	return FIELD_GET(CMDC_STATE, val);
 }
 
-/* FIXME: debug - remove me */
-static void sm1_earcrx_dump_irq_state(struct device *dev,
-				      struct regmap *map,
-				      unsigned int cmdc,
-				      unsigned int dmac)
-{
-	unsigned int sts0;
-
-	regmap_read(map, CMDC_STATUS0, &sts0);
-	dev_info(dev, "EARC IRQ: dmac 0x%08x - cmdc 0x%08x\n", dmac, cmdc);
-	dev_info(dev, "CMDC_STATUS0: 0x%08x - State %lu\n", sts0, FIELD_GET(CMDC_STATE, sts0));
-}
-
 static bool cmdc_is_capture_state(unsigned int state)
 {
 	switch (state) {
@@ -637,9 +624,6 @@ static irqreturn_t sm1_earcrx_dmac_isr(int irq, void *dev_id)
 	regmap_write(ed->map, TOP_DMAC_INT_PENDING, dmac);
 	regmap_write(ed->map, TOP_CMDC_INT_PENDING, cmdc);
 
-	/* FIXME: DEBUG - Needs to go away */
-	sm1_earcrx_dump_irq_state(dai->dev, ed->map, cmdc, dmac);
-
 	/* Re-arm rterm calibration when HPD goes through a low state */
 	if (cmdc & TOP_CMDC_INT_IDLE1)
 	        ed->rterm_done = false;
@@ -706,8 +690,6 @@ static irqreturn_t sm1_earcrx_dmac_isr_thread(int irq, void *dev_id)
 
 	ed->rate = rate;
 	mutex_unlock(&ed->lock);
-
-	dev_info(dai->dev, "Current rate => %u Hz", rate);
 
 	if (valid_change)
 		snd_soc_jack_report(&ed->jack,
