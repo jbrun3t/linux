@@ -57,6 +57,13 @@ config DUMMY_IRQ
 	  The sole purpose of this module is to help with debugging of systems on
 	  which spurious IRQs would happen on disabled IRQ vector.
 
+config DUMMY_REGULATOR_CONSUMER
+	tristate "Dummy regulator consumer"
+	depends on DEBUG_FS
+	help
+	  This module expects a single 'dummy' supply and expose a few debugfs entries
+	  for testing
+
 config IBM_ASM
 	tristate "Device driver for IBM RSA service processor"
 	depends on X86 && PCI && INPUT
