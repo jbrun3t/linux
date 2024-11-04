@@ -45,6 +45,41 @@
 				"TODDR_B IN 0", "TDMIN_A OUT",
 				"TODDR_C IN 0", "TDMIN_A OUT";
 	};
+
+	gpio-banger {
+		compatible = "i2c-gpio";
+		status = "okay";
+		pinctrl-0 = <&tp25590_bitbang_i2c_pins>;
+		pinctrl-names = "default";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		sda-gpios = <&gpio GPIOA_14 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio GPIOA_15 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+
+		tp25990_bang: hw-monitor@46 {
+			compatible = "ti,tps25990";
+			reg = <0x46>;
+
+			pinctrl-0 = <&tp25990_flt_irq_pins>;
+			pinctrl-names = "default";
+
+			ti,rimon-micro-ohms = <608000000>;
+			interrupts = <32 IRQ_TYPE_LEVEL_LOW>;
+			interrupt-parent = <&gpio_intc>;
+
+			regulators {
+				test_vout: vout {
+					regulator-name = "tps25990_vout";
+				};
+			};
+		};
+	};
+
+	foo {
+		compatible = "linux,dummy-regulator-consumer";
+		dummy-supply = <&test_vout>;
+	};
 };
 
 &cpu0 {
@@ -73,6 +108,45 @@
 	operating-points-v2 = <&cpu_opp_table>;
 	clocks = <&clkc CLKID_CPU3_CLK>;
 	clock-latency = <50000>;
+};
+
+&periphs_pinctrl {
+	tp25990_flt_irq_pins: tp25990_flt_irq {
+		mux {
+			groups = "GPIOH_4";
+			function = "gpio_periphs";
+			bias-pull-up;
+			output-disable;
+		};
+	};
+
+	tp25590_bitbang_i2c_pins: tp25590_bitbang_i2c {
+		mux {
+			groups = "GPIOA_14", "GPIOA_15";
+			function = "gpio_periphs";
+			bias-disable;
+		};
+	};
+};
+
+&i2c3 {
+	pinctrl-0 = <&i2c3_sda_a_pins>, <&i2c3_sck_a_pins>;
+	pinctrl-names = "default";
+	status = "disabled";
+
+	tp25990: hw-monitor@46 {
+		compatible = "ti,tps25990";
+		reg = <0x46>;
+
+		pinctrl-0 = <&tp25990_flt_irq_pins>;
+		pinctrl-names = "default";
+
+		ti,rimon-ohms = <1370>;
+
+		/* FLT Interrupt on GPIOH_4 */
+		interrupts = <32 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-parent = <&gpio_intc>;
+	};
 };
 
 &pwm_AO_cd {
