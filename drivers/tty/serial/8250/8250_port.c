@@ -2796,7 +2796,7 @@ serial8250_do_set_termios(struct uart_port *port, struct ktermios *termios,
 		serial8250_set_errors_and_ignores(port, termios);
 		serial8250_set_ier(port, termios);
 		serial8250_set_efr(port, termios);
-		serial8250_set_divisor(port, baud, quot, frac);
+		// serial8250_set_divisor(port, baud, quot, frac);
 		serial8250_set_fcr(port, termios);
 		/* Consoles manually poll CTS for hardware flow control. */
 		if (uart_console(port) &&
