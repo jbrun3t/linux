@@ -186,6 +186,84 @@
 			status = "disabled";
 		};
 
+		uart1: serial@2501000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2501000 0x400>;
+			interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART1>;
+			resets = <&ccu RST_BUS_UART1>;
+//			dmas = <&dma 15>, <&dma 15>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		uart2: serial@2502000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2502000 0x400>;
+			interrupts = <GIC_SPI 4 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART2>;
+			resets = <&ccu RST_BUS_UART2>;
+//			dmas = <&dma 16>, <&dma 16>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		uart3: serial@2503000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2503000 0x400>;
+			interrupts = <GIC_SPI 5 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART3>;
+			resets = <&ccu RST_BUS_UART3>;
+//			dmas = <&dma 17>, <&dma 17>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		uart4: serial@2504000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2504000 0x400>;
+			interrupts = <GIC_SPI 6 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART4>;
+			resets = <&ccu RST_BUS_UART4>;
+//			dmas = <&dma 18>, <&dma 18>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		uart5: serial@2505000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2505000 0x400>;
+			interrupts = <GIC_SPI 7 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART5>;
+			resets = <&ccu RST_BUS_UART5>;
+//			dmas = <&dma 19>, <&dma 19>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		uart6: serial@2506000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x2506000 0x400>;
+			interrupts = <GIC_SPI 8 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&ccu CLK_BUS_UART6>;
+			resets = <&ccu RST_BUS_UART6>;
+//			dmas = <&dma 20>, <&dma 20>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
 		gic: interrupt-controller@3400000 {
 			compatible = "arm,gic-v3";
 			#address-cells = <1>;
@@ -248,6 +326,32 @@
 			reg = <0x07060000 0xB000>;
 			clocks = <&s_prcm CLK_BUS_R_PPU>;
 			#power-domain-cells = <1>;
+		};
+
+		s_uart0: serial@7080000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x7080000 0x400>;
+			interrupts = <GIC_SPI 201 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&s_prcm CLK_BUS_R_UART0>;
+			resets = <&s_prcm RST_BUS_R_UART0>;
+//			dmas = <&dma 50>, <&dma 50>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
+		};
+
+		s_uart1: serial@7081000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0x7081000 0x400>;
+			interrupts = <GIC_SPI 202 IRQ_TYPE_LEVEL_HIGH>;
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			clocks = <&s_prcm CLK_BUS_R_UART1>;
+			resets = <&s_prcm RST_BUS_R_UART1>;
+//			dmas = <&dma 51>, <&dma 51>;
+//			dma-names = "tx", "rx";
+			status = "disabled";
 		};
 
 		rtc: rtc@7090000 {
