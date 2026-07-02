@@ -243,6 +243,13 @@
 			#interrupt-cells = <3>;
 		};
 
+		ppu: power-controller@7060000 {
+			compatible = "allwinner,sun60i-a733-pck-600";
+			reg = <0x07060000 0xB000>;
+			clocks = <&s_prcm CLK_BUS_R_PPU>;
+			#power-domain-cells = <1>;
+		};
+
 		rtc: rtc@7090000 {
 			compatible = "allwinner,sun60i-a733-rtc",
 				     "allwinner,sun50i-r329-rtc";
