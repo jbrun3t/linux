@@ -521,6 +521,13 @@
 			#gpio-cells = <3>;
 			interrupt-controller;
 			#interrupt-cells = <3>;
+
+			/omit-if-no-ref/
+			s_i2c0_pl01_pins: s-i2c0-pl01-pins {
+				pins = "PL0", "PL1";
+				allwinner,pinmux = <2>;
+				function = "s_i2c0";
+			};
 		};
 
 		ppu: power-controller@7060000 {
