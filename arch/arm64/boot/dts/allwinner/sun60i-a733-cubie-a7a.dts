@@ -25,5 +25,7 @@
 };
 
 &s_twi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&s_i2c0_pl01_pins>;
 	status = "okay";
 };
