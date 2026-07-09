@@ -182,7 +182,7 @@
 			reg_eldo1: eldo1 {
 				regulator-always-on;
 				regulator-min-microvolt = <900000>;
-				regulator-max-microvolt = <900000>;
+				regulator-max-microvolt = <1075000>;
 			};
 
 			reg_eldo6: eldo6 {
