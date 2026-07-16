@@ -520,6 +520,15 @@
 			#reset-cells = <1>;
 		};
 
+		nmi_intc: interrupt-controller@7010320 {
+			compatible = "allwinner,sun60i-a733-nmi",
+				     "allwinner,sun55i-a523-nmi";
+			reg = <0x07010320 0xc>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupts = <GIC_SPI 188 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
 		s_gpio: pinctrl@7025000 {
 			compatible = "allwinner,sun60i-a733-r-pinctrl";
 			reg = <0x7025000 0x800>;
