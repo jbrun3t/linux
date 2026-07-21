@@ -2641,7 +2641,7 @@ static int rt5682s_wclk_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct rt5682s_priv *rt5682s =
 		container_of(hw, struct rt5682s_priv, dai_clks_hw[RT5682S_DAI_WCLK_IDX]);
 	struct snd_soc_component *component = rt5682s->component;
-	struct clk *parent_clk;
+	struct clk_hw *parent_clk;
 	const char * const clk_name = clk_hw_get_name(hw);
 	unsigned int clk_pll2_fout;
 
@@ -2655,7 +2655,7 @@ static int rt5682s_wclk_set_rate(struct clk_hw *hw, unsigned long rate,
 	 *
 	 * It will set the codec anyway by assuming mclk is 48MHz.
 	 */
-	parent_clk = clk_get_parent(hw->clk);
+	parent_clk = clk_hw_get_parent(hw);
 	if (!parent_clk)
 		dev_warn(component->dev,
 			"Parent mclk of wclk not acquired in driver. Please ensure mclk was provided as %d Hz.\n",

@@ -340,10 +340,10 @@ static int clk_audio_pll_pmc_determine_rate(struct clk_hw *hw,
 	if (!req->rate)
 		return 0;
 
-	best_parent_rate = clk_round_rate(pclk->clk, 1);
+	best_parent_rate = clk_hw_round_rate(pclk, 1);
 	div = max(best_parent_rate / req->rate, 1UL);
 	for (; div <= AUDIO_PLL_QDPMC_MAX; div++) {
-		best_parent_rate = clk_round_rate(pclk->clk, req->rate * div);
+		best_parent_rate = clk_hw_round_rate(pclk, req->rate * div);
 		tmp_rate = best_parent_rate / div;
 		tmp_diff = abs(req->rate - tmp_rate);
 

@@ -186,8 +186,8 @@ static u8 cdce925_pll_calc_p(u16 n, u16 m)
 /* Returns VCO range bits for VCO1_0_RANGE */
 static u8 cdce925_pll_calc_range_bits(struct clk_hw *hw, u16 n, u16 m)
 {
-	struct clk *parent = clk_get_parent(hw->clk);
-	unsigned long rate = clk_get_rate(parent);
+	struct clk_hw *parent = clk_hw_get_parent(hw);
+	unsigned long rate = clk_hw_get_rate(parent);
 
 	rate = mult_frac(rate, (unsigned long)n, (unsigned long)m);
 	if (rate >= 175000000)
@@ -382,9 +382,9 @@ static u16 cdce925_calc_divider(unsigned long rate,
 static unsigned long cdce925_clk_best_parent_rate(
 	struct clk_hw *hw, unsigned long rate)
 {
-	struct clk *pll = clk_get_parent(hw->clk);
-	struct clk *root = clk_get_parent(pll);
-	unsigned long root_rate = clk_get_rate(root);
+	struct clk_hw *pll = clk_hw_get_parent(hw);
+	struct clk_hw *root = clk_hw_get_parent(pll);
+	unsigned long root_rate = clk_hw_get_rate(root);
 	unsigned long best_rate_error = rate;
 	u16 pdiv_min;
 	u16 pdiv_max;
@@ -403,7 +403,7 @@ static unsigned long cdce925_clk_best_parent_rate(
 	pdiv_best = pdiv_min;
 	for (pdiv_now = pdiv_min; pdiv_now < pdiv_max; ++pdiv_now) {
 		unsigned long target_rate = rate * pdiv_now;
-		long pll_rate = clk_round_rate(pll, target_rate);
+		long pll_rate = clk_hw_round_rate(pll, target_rate);
 		unsigned long actual_rate;
 		unsigned long rate_error;
 

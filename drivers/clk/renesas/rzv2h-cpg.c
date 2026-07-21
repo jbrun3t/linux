@@ -1327,14 +1327,10 @@ static void rzv2h_mod_clock_mstop_disable(struct rzv2h_cpg_priv *priv,
 static int rzv2h_parent_clk_mux_to_index(struct clk_hw *hw)
 {
 	struct clk_hw *parent_hw;
-	struct clk *parent_clk;
 	struct clk_mux *mux;
 	u32 val;
 
-	/* This will always succeed, so no need to check for IS_ERR() */
-	parent_clk = clk_get_parent(hw->clk);
-
-	parent_hw = __clk_get_hw(parent_clk);
+	parent_hw = clk_hw_get_parent(hw);
 	mux = to_clk_mux(parent_hw);
 
 	val = readl(mux->reg) >> mux->shift;

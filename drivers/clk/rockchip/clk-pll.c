@@ -332,7 +332,7 @@ static int rockchip_rk3036_pll_init(struct clk_hw *hw)
 		rate->refdiv != cur.refdiv || rate->postdiv2 != cur.postdiv2 ||
 		rate->dsmpd != cur.dsmpd ||
 		(!cur.dsmpd && (rate->frac != cur.frac))) {
-		struct clk *parent = clk_get_parent(hw->clk);
+		struct clk_hw *parent = clk_hw_get_parent(hw);
 
 		if (!parent) {
 			pr_warn("%s: parent of %s not available\n",
@@ -816,7 +816,7 @@ static int rockchip_rk3399_pll_init(struct clk_hw *hw)
 		rate->refdiv != cur.refdiv || rate->postdiv2 != cur.postdiv2 ||
 		rate->dsmpd != cur.dsmpd ||
 		(!cur.dsmpd && (rate->frac != cur.frac))) {
-		struct clk *parent = clk_get_parent(hw->clk);
+		struct clk_hw *parent = clk_hw_get_parent(hw);
 
 		if (!parent) {
 			pr_warn("%s: parent of %s not available\n",
