@@ -575,7 +575,12 @@ static int stm32_i2s_add_mclk_provider(struct stm32_i2s_data *i2s)
 		dev_err(dev, "mclk register fails with error %d\n", ret);
 		return ret;
 	}
-	i2s->i2smclk = hw->clk;
+
+	i2s->i2smclk = devm_clk_hw_get_clk(dev, hw, NULL);
+	if (IS_ERR(i2s->i2smclk)) {
+		dev_err(dev, "get clock failed\n");
+		return PTR_ERR(i2s->i2smclk);
+	}
 
 	/* register mclk provider */
 	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, hw);
