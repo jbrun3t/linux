@@ -995,8 +995,8 @@ r9a06g032_div_determine_rate(struct clk_hw *hw, struct clk_rate_request *req)
 	struct r9a06g032_clk_div *clk = to_r9a06g032_div(hw);
 	u32 div = DIV_ROUND_UP(req->best_parent_rate, req->rate);
 
-	pr_devel("%s %pC %ld (prate %ld) (wanted div %u)\n", __func__,
-		 hw->clk, req->rate, req->best_parent_rate, div);
+	pr_devel("%s %s %ld (prate %ld) (wanted div %u)\n", __func__,
+		 clk_hw_get_name(hw), req->rate, req->best_parent_rate, div);
 	pr_devel("   min %d (%ld) max %d (%ld)\n",
 		 clk->min, DIV_ROUND_UP(req->best_parent_rate, clk->min),
 		 clk->max, DIV_ROUND_UP(req->best_parent_rate, clk->max));
@@ -1018,7 +1018,7 @@ r9a06g032_div_determine_rate(struct clk_hw *hw, struct clk_rate_request *req)
 		return 0;
 	}
 	req->rate = DIV_ROUND_UP(req->best_parent_rate, div);
-	pr_devel("%s %pC %ld / %u = %ld\n", __func__, hw->clk,
+	pr_devel("%s %s %ld / %u = %ld\n", __func__, clk_hw_get_name(hw),
 		 req->best_parent_rate, div, req->rate);
 	return 0;
 }
@@ -1032,7 +1032,7 @@ r9a06g032_div_set_rate(struct clk_hw *hw,
 	u32 div = DIV_ROUND_UP(parent_rate, rate + 1);
 	u32 __iomem *reg = clk->clocks->reg + (4 * clk->reg);
 
-	pr_devel("%s %pC rate %ld parent %ld div %d\n", __func__, hw->clk,
+	pr_devel("%s %s rate %ld parent %ld div %d\n", __func__, clk_hw_get_name(hw),
 		 rate, parent_rate, div);
 
 	/*

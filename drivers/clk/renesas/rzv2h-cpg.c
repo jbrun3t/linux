@@ -869,8 +869,8 @@ static int rzv2h_cpg_pll_clk_enable(struct clk_hw *hw)
 			(val & (CPG_PLL_MON_RESETB | CPG_PLL_MON_LOCK)) ==
 			(CPG_PLL_MON_RESETB | CPG_PLL_MON_LOCK), 200, 2000);
 	if (ret)
-		dev_err(priv->dev, "Failed to enable PLL 0x%x/%pC\n",
-			stby_offset, hw->clk);
+		dev_err(priv->dev, "Failed to enable PLL 0x%x/%s\n",
+			stby_offset, clk_hw_get_name(hw));
 
 	return ret;
 }
@@ -1379,7 +1379,7 @@ static int rzv2h_mod_clock_endisable(struct clk_hw *hw, bool enable)
 	u32 value;
 	int error;
 
-	dev_dbg(dev, "CLK_ON 0x%x/%pC %s\n", reg, hw->clk,
+	dev_dbg(dev, "CLK_ON 0x%x/%s %s\n", reg, clk_hw_get_name(hw),
 		str_on_off(enable));
 
 	if (enabled == enable)
@@ -1405,8 +1405,8 @@ static int rzv2h_mod_clock_endisable(struct clk_hw *hw, bool enable)
 	error = readl_poll_timeout_atomic(priv->base + reg, value,
 					  value & bitmask, 0, 10);
 	if (error)
-		dev_err(dev, "Failed to enable CLK_ON 0x%x/%pC\n",
-			GET_CLK_ON_OFFSET(clock->on_index), hw->clk);
+		dev_err(dev, "Failed to enable CLK_ON 0x%x/%s\n",
+			GET_CLK_ON_OFFSET(clock->on_index), clk_hw_get_name(hw));
 
 	return error;
 }

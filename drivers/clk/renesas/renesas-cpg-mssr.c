@@ -265,7 +265,7 @@ static int cpg_mstp_clock_endisable(struct clk_hw *hw, bool enable)
 	u32 value;
 	int error;
 
-	dev_dbg(dev, "MSTP %u%02u/%pC %s\n", reg, bit, hw->clk,
+	dev_dbg(dev, "MSTP %u%02u/%s %s\n", reg, bit, clk_hw_get_name(hw),
 		str_on_off(enable));
 	spin_lock_irqsave(&priv->pub.rmw_lock, flags);
 

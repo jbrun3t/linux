@@ -1217,8 +1217,8 @@ static int rzg3l_cpg_pll_clk_endisable(struct clk_hw *hw, bool enable)
 	ret = readl_poll_timeout_atomic(priv->base + mon_offset, val,
 					mon_val == (val & mon_mask), 10, 100);
 	if (ret)
-		dev_err(priv->dev, "Failed to %s PLL 0x%x/%pC\n", enable ?
-			"enable" : "disable", stby_offset, hw->clk);
+		dev_err(priv->dev, "Failed to %s PLL 0x%x/%s\n", enable ?
+			"enable" : "disable", stby_offset, clk_hw_get_name(hw));
 
 	return ret;
 }
@@ -1492,7 +1492,7 @@ static int rzg2l_mod_clock_mstop_show(struct seq_file *s, void *what)
 			   MSTOP_OFF(clk->mstop->conf), val);
 
 		for (unsigned int i = 0; i < clk->num_shared_mstop_clks; i++)
-			seq_printf(s, " %pC", clk->shared_mstop_clks[i]->hw.clk);
+			seq_printf(s, " %s", clk_hw_get_name(&clk->shared_mstop_clks[i]->hw));
 
 		seq_puts(s, "\n");
 	}
@@ -1513,11 +1513,11 @@ static int rzg2l_mod_clock_endisable_helper(struct clk_hw *hw, bool enable,
 	int error;
 
 	if (!clock->off) {
-		dev_dbg(dev, "%pC does not support ON/OFF\n",  hw->clk);
+		dev_dbg(dev, "%s does not support ON/OFF\n",  clk_hw_get_name(hw));
 		return 0;
 	}
 
-	dev_dbg(dev, "CLK_ON 0x%x/%pC %s\n", CLK_ON_R(reg), hw->clk,
+	dev_dbg(dev, "CLK_ON 0x%x/%s %s\n", CLK_ON_R(reg), clk_hw_get_name(hw),
 		str_on_off(enable));
 
 	value = bitmask << 16;
@@ -1545,8 +1545,8 @@ static int rzg2l_mod_clock_endisable_helper(struct clk_hw *hw, bool enable,
 	error = readl_poll_timeout_atomic(priv->base + CLK_MON_R(reg), value,
 					  value & bitmask, 0, 10);
 	if (error)
-		dev_err(dev, "Failed to enable CLK_ON 0x%x/%pC\n",
-			CLK_ON_R(reg), hw->clk);
+		dev_err(dev, "Failed to enable CLK_ON 0x%x/%s\n",
+			CLK_ON_R(reg), clk_hw_get_name(hw));
 
 	return error;
 }
@@ -1604,7 +1604,7 @@ static int rzg2l_mod_clock_is_enabled(struct clk_hw *hw)
 	u32 value;
 
 	if (!clock->off) {
-		dev_dbg(priv->dev, "%pC does not support ON/OFF\n",  hw->clk);
+		dev_dbg(priv->dev, "%s does not support ON/OFF\n",  clk_hw_get_name(hw));
 		return 1;
 	}
 
