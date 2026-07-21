@@ -294,7 +294,7 @@ static int aspeed_adc_set_sampling_rate(struct iio_dev *indio_dev, u32 rate)
 		return -EINVAL;
 	/* Each sampling needs 12 clocks to convert.*/
 	clk_set_rate(data->clk_scaler->clk, rate * ASPEED_CLOCKS_PER_SAMPLE);
-	rate = clk_get_rate(data->clk_scaler->clk);
+	rate = clk_hw_get_rate(data->clk_scaler);
 	data->sample_period_ns = DIV_ROUND_UP_ULL(
 		(u64)NSEC_PER_SEC * ASPEED_CLOCKS_PER_SAMPLE, rate);
 	dev_dbg(data->dev, "Adc clock = %d sample period = %d ns", rate,
@@ -366,7 +366,7 @@ static int aspeed_adc_read_raw(struct iio_dev *indio_dev,
 		return IIO_VAL_FRACTIONAL_LOG2;
 
 	case IIO_CHAN_INFO_SAMP_FREQ:
-		*val = clk_get_rate(data->clk_scaler->clk) /
+		*val = clk_hw_get_rate(data->clk_scaler) /
 				ASPEED_CLOCKS_PER_SAMPLE;
 		return IIO_VAL_INT;
 
