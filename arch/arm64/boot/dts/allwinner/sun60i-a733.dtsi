@@ -113,6 +113,22 @@
 		};
 	};
 
+	gmac_stmmac_axi_setup: stmmac-axi-config {
+		snps,wr_osr_lmt = <0xf>;
+		snps,rd_osr_lmt = <0xf>;
+		snps,blen = <256 128 64 32 16 8 4>;
+	};
+
+	gmac_mtl_tx_setup: tx-queues-config {
+		snps,tx-queues-to-use = <1>;
+		queue0 {};
+	};
+
+	gmac_mtl_rx_setup: rx-queues-config {
+		snps,rx-queues-to-use = <1>;
+		queue0 {};
+	};
+
 	hosc: hosc-clk {
 		#clock-cells = <0>;
 		compatible = "fixed-clock";
@@ -536,6 +552,66 @@
 			status = "disabled";
 			#address-cells = <1>;
 			#size-cells = <0>;
+		};
+
+		gmac0: ethernet@4500000 {
+			compatible = "allwinner,sun60i-a733-gmac210",
+				     "snps,dwmac-5.20";
+			reg = <0x4500000 0x8000>,
+			      <0x4508000 0x1000>;
+			clocks = <&ccu CLK_BUS_GMAC0>,
+			         <&ccu CLK_MBUS_GMAC0>,
+				 <&ccu CLK_GMAC_PTP>;
+			clock-names = "stmmaceth", "mbus", "ptp_ref";
+			resets = <&ccu RST_BUS_GMAC0>,
+				 <&ccu RST_BUS_GMAC0_AXI>;
+			reset-names = "stmmaceth", "ahb";
+			interrupts = <GIC_SPI 172 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 178 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 173 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "macirq", "eth_lpi", "tx-queue-0", "rx-queue-0";
+			snps,fixed-burst;
+			snps,axi-config = <&gmac_stmmac_axi_setup>;
+			snps,mtl-rx-config = <&gmac_mtl_rx_setup>;
+			snps,mtl-tx-config = <&gmac_mtl_tx_setup>;
+			status = "disabled";
+
+			mdio0: mdio {
+				compatible = "snps,dwmac-mdio";
+				#address-cells = <1>;
+				#size-cells = <0>;
+			};
+		};
+
+		gmac1: ethernet@4510000 {
+			compatible = "allwinner,sun60i-a733-gmac210",
+				     "snps,dwmac-5.20";
+			reg = <0x4510000 0x8000>,
+			      <0x4518000 0x1000>;
+			clocks = <&ccu CLK_BUS_GMAC1>,
+				 <&ccu CLK_MBUS_GMAC1>,
+				 <&ccu CLK_GMAC_PTP>;
+			clock-names = "stmmaceth", "mbus", "ptp_ref";
+			resets = <&ccu RST_BUS_GMAC1>,
+				 <&ccu RST_BUS_GMAC1_AXI>;
+			reset-names = "stmmaceth", "ahb";
+			interrupts = <GIC_SPI 175 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 179 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "macirq", "eth_lpi", "tx-queue-0", "rx-queue-0";
+			snps,fixed-burst;
+			snps,axi-config = <&gmac_stmmac_axi_setup>;
+			snps,mtl-rx-config = <&gmac_mtl_rx_setup>;
+			snps,mtl-tx-config = <&gmac_mtl_tx_setup>;
+			status = "disabled";
+
+			mdio1: mdio {
+				compatible = "snps,dwmac-mdio";
+				#address-cells = <1>;
+				#size-cells = <0>;
+			};
 		};
 
 		s_prcm: clock-controller@7010000 {
