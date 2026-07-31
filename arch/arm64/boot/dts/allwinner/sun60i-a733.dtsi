@@ -178,6 +178,18 @@
 			#interrupt-cells = <3>;
 
 			/omit-if-no-ref/
+			gmac0_pins: gmac0-pins {
+				pins = "PH0",  "PH1",  "PH2",  "PH3",  "PH4",
+				       "PH5",  "PH6",  "PH7",  "PH8",  "PH9",
+				       "PH10", "PH11", "PH12", "PH13", "PH14",
+				       "PH15";
+				allwinner,pinmux = <5>;
+				function = "gmac0";
+				drive-strength = <20>;
+				bias-pull-up;
+			};
+
+			/omit-if-no-ref/
 			mmc0_pins: mmc0-pins {
 				pins = "PF0" ,"PF1", "PF2", "PF3", "PF4", "PF5";
 				allwinner,pinmux = <2>;

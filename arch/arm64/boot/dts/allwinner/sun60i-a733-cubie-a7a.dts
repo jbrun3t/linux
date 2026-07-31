@@ -209,6 +209,24 @@
 	};
 };
 
+/*
+ * The schematics are a bit misleading as all signals name are starting
+ * with "GMAC1_" but they are actually connected on pins providing
+ * the GMAC0 function
+ */
+&gmac0 {
+	phy-mode = "rgmii-id";
+	phy-handle = <&ext_rgmii0_phy>;
+	phy-supply = <&reg_swout1>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&gmac0_pins>;
+
+	tx-internal-delay-ps = <1200>;
+	rx-internal-delay-ps = <1000>;
+
+	status = "okay";
+};
+
 &gpio {
 	vcc-pb-supply = <&reg_swout2>; /* VCC-IO */
 	vcc-pc-supply = <&reg_cldo5>;
@@ -219,6 +237,21 @@
 	vcc-ph-supply = <&reg_swout2>;
 	vcc-pj-supply = <&reg_bldo2>;
 	vcc-pk-supply = <&reg_bldo1>;
+};
+
+&mdio0 {
+	ext_rgmii0_phy: ethernet-phy@1 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <1>;
+
+		// LPI currently unstable
+		eee-broken-100tx;
+		eee-broken-1000t;
+		
+		reset-gpios = <&gpio 7 16 GPIO_ACTIVE_LOW>; /* PH16 */
+		reset-assert-us = <10000>;
+		reset-deassert-us = <150000>;
+	};
 };
 
 &mmc0 {
