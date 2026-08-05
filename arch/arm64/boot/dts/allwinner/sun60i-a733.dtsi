@@ -503,6 +503,82 @@
 			#size-cells = <0>;
 		};
 
+		spi0: spi@2540000 {
+			compatible = "allwinner,sun60i-a733-spi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x2540000 0x1000>;
+			interrupts = <GIC_SPI 24 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI0>, <&ccu CLK_SPI0>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 23>, <&dma 23>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&ccu RST_BUS_SPI0>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi1: spi@2541000 {
+			compatible = "allwinner,sun60i-a733-spi-dbi",
+				     "allwinner,sun55i-a523-spi-dbi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x2541000 0x1000>;
+			interrupts = <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI1>, <&ccu CLK_SPI1>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 24>, <&dma 24>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&ccu RST_BUS_SPI1>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi2: spi@2542000 {
+			compatible = "allwinner,sun60i-a733-spi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x2542000 0x1000>;
+			interrupts = <GIC_SPI 26 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI2>, <&ccu CLK_SPI2>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 25>, <&dma 25>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&ccu RST_BUS_SPI2>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi3: spi@2543000 {
+			compatible = "allwinner,sun60i-a733-spi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x2543000 0x1000>;
+			interrupts = <GIC_SPI 27 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI3>, <&ccu CLK_SPI3>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 26>, <&dma 26>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&ccu RST_BUS_SPI3>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		spi4: spi@2544000 {
+			compatible = "allwinner,sun60i-a733-spi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x2544000 0x1000>;
+			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&ccu CLK_BUS_SPI4>, <&ccu CLK_SPI4>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 54>, <&dma 54>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&ccu RST_BUS_SPI4>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
 		gic: interrupt-controller@3400000 {
 			compatible = "arm,gic-v3";
 			#address-cells = <1>;
@@ -766,6 +842,21 @@
 				 <&s_prcm CLK_R_AHB>;
 			clock-names = "bus", "hosc", "ahb";
 			#clock-cells = <1>;
+		};
+
+		s_spi: spi@7092000 {
+			compatible = "allwinner,sun60i-a733-spi",
+				     "allwinner,sun55i-a523-spi";
+			reg = <0x7092000 0x1000>;
+			interrupts = <GIC_SPI 210 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&s_prcm CLK_BUS_R_SPI>, <&s_prcm CLK_R_SPI>;
+			clock-names = "ahb", "mod";
+			/* dmas = <&dma 54>, <&dma 54>; */
+			/* dma-names = "rx", "tx"; */
+			resets = <&s_prcm RST_BUS_R_SPI>;
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
 		};
 	};
 };
