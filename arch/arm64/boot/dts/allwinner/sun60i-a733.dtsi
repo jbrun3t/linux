@@ -199,6 +199,22 @@
 			};
 
 			/omit-if-no-ref/
+			spi0_pins: spi0-pins {
+				pins = "PC12", "PC2", "PC4";
+				allwinner,pinmux = <5>;
+				function = "spi0";
+				drive-strength = <20>;
+			};
+
+			/omit-if-no-ref/
+			spi0_cs0_pins: spi0-cs0-pins {
+				pins = "PC3";
+				allwinner,pinmux = <5>;
+				function = "spi0";
+				drive-strength = <20>;
+			};
+
+			/omit-if-no-ref/
 			uart0_pb_pins: uart0-pb-pins {
 				pins = "PB9", "PB10";
 				allwinner,pinmux = <2>;
