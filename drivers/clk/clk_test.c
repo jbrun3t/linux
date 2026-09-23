@@ -152,6 +152,63 @@ static const struct clk_ops clk_dummy_single_parent_ops = {
 	.get_parent = clk_dummy_single_get_parent,
 };
 
+#define DUMMY_DIV_MAX			16
+#define STEP_CLOCK_STEP			(16 * HZ_PER_MHZ)
+
+/*
+ * A clock that divides its parent, like most hardware dividers do. It answers
+ * determine_rate() from the parent rate carried by the request and never reads
+ * the live tree.
+ */
+struct clk_dummy_div_context {
+	struct clk_hw hw;
+	unsigned int div;
+};
+
+static unsigned int clk_dummy_div_best(unsigned long parent_rate,
+				       unsigned long rate)
+{
+	unsigned long div = rate ? DIV_ROUND_UP(parent_rate, rate) : DUMMY_DIV_MAX;
+
+	return clamp_t(unsigned long, div, 1, DUMMY_DIV_MAX);
+}
+
+static unsigned long clk_dummy_div_recalc_rate(struct clk_hw *hw,
+					       unsigned long parent_rate)
+{
+	struct clk_dummy_div_context *ctx =
+		container_of(hw, struct clk_dummy_div_context, hw);
+
+	return DIV_ROUND_UP(parent_rate, ctx->div);
+}
+
+static int clk_dummy_div_determine_rate(struct clk_hw *hw,
+					struct clk_rate_request *req)
+{
+	unsigned int div = clk_dummy_div_best(req->best_parent_rate, req->rate);
+
+	req->rate = DIV_ROUND_UP(req->best_parent_rate, div);
+
+	return 0;
+}
+
+static int clk_dummy_div_set_rate(struct clk_hw *hw, unsigned long rate,
+				  unsigned long parent_rate)
+{
+	struct clk_dummy_div_context *ctx =
+		container_of(hw, struct clk_dummy_div_context, hw);
+
+	ctx->div = clk_dummy_div_best(parent_rate, rate);
+
+	return 0;
+}
+
+static const struct clk_ops clk_dummy_div_ops = {
+	.recalc_rate = clk_dummy_div_recalc_rate,
+	.determine_rate = clk_dummy_div_determine_rate,
+	.set_rate = clk_dummy_div_set_rate,
+};
+
 struct clk_multiple_parent_ctx {
 	struct clk_dummy_context parents_ctx[2];
 	struct clk_hw hw;
@@ -3876,6 +3933,111 @@ static struct kunit_suite clk_parse_clkspec_test_suite = {
 	.test_cases = clk_parse_clkspec_test_cases,
 };
 
+/*
+ * Two pass-through clocks forwarding their rate requests to a parent that can
+ * run at any rate:
+ *
+ *	pass-through-parent -> pass-through-0 -> pass-through-1
+ *
+ * A clock without determine_rate() runs at its parent's rate, so a range set
+ * on it is one its parent has to honour.
+ */
+struct clk_pass_through_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_hw hw[2];
+};
+
+static int clk_pass_through_test_init(struct kunit *test)
+{
+	struct clk_pass_through_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = DUMMY_CLOCK_INIT_RATE;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("pass-through-parent",
+							&clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->hw[0].init = CLK_HW_INIT_HW("pass-through-0", &ctx->parent_ctx.hw,
+					 &empty_clk_ops, CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->hw[0]);
+	if (ret)
+		return ret;
+
+	ctx->hw[1].init = CLK_HW_INIT_HW("pass-through-1", &ctx->hw[0],
+					 &empty_clk_ops, CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->hw[1]);
+}
+
+/*
+ * Test that a rate asked of a pass-through clock beyond its range moves the
+ * parent only as far as the range allows, which is also what rounding says.
+ */
+static void clk_pass_through_test_set_rate_range(struct kunit *test)
+{
+	struct clk_pass_through_ctx *ctx = test->priv;
+	struct clk *clk = clk_hw_get_clk_kunit(test, &ctx->hw[0], NULL);
+	long rounded;
+	int ret;
+
+	ret = clk_set_rate_range(clk, DUMMY_CLOCK_INIT_RATE, DUMMY_CLOCK_RATE_1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	rounded = clk_round_rate(clk, DUMMY_CLOCK_RATE_2);
+	KUNIT_ASSERT_EQ(test, rounded, DUMMY_CLOCK_RATE_1);
+
+	ret = clk_set_rate(clk, DUMMY_CLOCK_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(clk), DUMMY_CLOCK_RATE_1);
+}
+
+/*
+ * Test that the range of a pass-through clock is honoured when the rate is
+ * asked of another pass-through clock below it.
+ */
+static void clk_pass_through_test_set_rate_range_below(struct kunit *test)
+{
+	struct clk_pass_through_ctx *ctx = test->priv;
+	struct clk *upper = clk_hw_get_clk_kunit(test, &ctx->hw[0], NULL);
+	struct clk *lower = clk_hw_get_clk_kunit(test, &ctx->hw[1], NULL);
+	int ret;
+
+	ret = clk_set_rate_range(upper, DUMMY_CLOCK_INIT_RATE,
+				 DUMMY_CLOCK_RATE_1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(lower, DUMMY_CLOCK_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(upper), DUMMY_CLOCK_RATE_1);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(lower), DUMMY_CLOCK_RATE_1);
+}
+
+static struct kunit_case clk_pass_through_test_cases[] = {
+	KUNIT_CASE(clk_pass_through_test_set_rate_range),
+	KUNIT_CASE(clk_pass_through_test_set_rate_range_below),
+	{}
+};
+
+/*
+ * Test suite for pass-through clocks carrying a range.
+ *
+ * These tests exercise that a rate change honours the range of every clock
+ * running at the rate it plans, not only of the clocks that round.
+ */
+static struct kunit_suite clk_pass_through_test_suite = {
+	.name = "clk-pass-through-range",
+	.init = clk_pass_through_test_init,
+	.test_cases = clk_pass_through_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
@@ -3888,6 +4050,7 @@ kunit_test_suites(
 	&clk_mux_notifier_test_suite,
 	&clk_orphan_transparent_multiple_parent_mux_test_suite,
 	&clk_orphan_transparent_single_parent_test_suite,
+	&clk_pass_through_test_suite,
 	&clk_orphan_two_level_root_last_test_suite,
 	&clk_range_test_suite,
 	&clk_range_maximize_test_suite,
