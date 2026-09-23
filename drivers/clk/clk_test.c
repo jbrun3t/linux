@@ -4038,6 +4038,207 @@ static struct kunit_suite clk_pass_through_test_suite = {
 	.test_cases = clk_pass_through_test_cases,
 };
 
+/*
+ * A divider below a mux choosing between two fixed rates:
+ *
+ *	parent-0   parent-1
+ *	     \       /
+ *	     test-mux
+ *	        |
+ *	    req-rate-div
+ */
+struct clk_req_rate_ctx {
+	struct clk_multiple_parent_ctx mux_ctx;
+	struct clk_dummy_div_context div_ctx;
+};
+
+static int clk_req_rate_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "parent-0", "parent-1" };
+	struct clk_req_rate_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->mux_ctx.parents_ctx[0].rate = DUMMY_CLOCK_RATE_1;
+	ctx->mux_ctx.parents_ctx[0].hw.init =
+		CLK_HW_INIT_NO_PARENT("parent-0", &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.parents_ctx[0].hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.parents_ctx[1].rate = DUMMY_CLOCK_RATE_2;
+	ctx->mux_ctx.parents_ctx[1].hw.init =
+		CLK_HW_INIT_NO_PARENT("parent-1", &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.parents_ctx[1].hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.current_parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("test-mux", parents,
+						   &clk_multiple_parents_mux_ops,
+						   0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 1;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("req-rate-div", &ctx->mux_ctx.hw,
+					      &clk_dummy_div_ops, 0);
+	return clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+}
+
+/*
+ * Test that a range change on a clock no consumer asked a rate of keeps the
+ * clock where it is, rather than taking it back to its boot rate.
+ */
+static void clk_req_rate_test_range_without_request(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *p0 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[0].hw,
+					      NULL);
+	int ret;
+
+	ret = clk_set_rate(p0, DUMMY_CLOCK_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, clk_get_rate(div), DUMMY_CLOCK_RATE_2);
+
+	ret = clk_set_rate_range(div, DUMMY_CLOCK_INIT_RATE, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), DUMMY_CLOCK_RATE_2);
+}
+
+/*
+ * Test that a parent switch above a clock does not erase the rate asked of
+ * it, so that a later range change asks for that rate again.
+ */
+static void clk_req_rate_test_request_survives_parent_switch(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *p1 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[1].hw,
+					      NULL);
+	int ret;
+
+	ret = clk_set_rate(div, DIV_ROUND_UP(DUMMY_CLOCK_RATE_1, 2));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_parent(mux, p1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, clk_get_rate(div), DIV_ROUND_UP(DUMMY_CLOCK_RATE_2, 2));
+
+	ret = clk_set_rate_range(div, DUMMY_CLOCK_INIT_RATE, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* the closest the divider gets to 71MHz from 242MHz, from below */
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), DIV_ROUND_UP(DUMMY_CLOCK_RATE_2, 4));
+}
+
+/*
+ * Test that a clock given a parent with clk_set_parent() keeps it through a
+ * later range change, even though a rate asked of it before would be better
+ * served by the other parent.
+ */
+static void clk_req_rate_test_set_parent_supersedes_request(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *p1 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[1].hw,
+					      NULL);
+	int ret;
+
+	ret = clk_set_rate(mux, DUMMY_CLOCK_RATE_1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_parent(mux, p1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(mux, DUMMY_CLOCK_INIT_RATE, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->mux_ctx.parents_ctx[1].hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), DUMMY_CLOCK_RATE_2);
+}
+
+/*
+ * Test that the rate asked of a clock is forgotten with the last consumer
+ * that could have asked it, and does not come back through a new one.
+ */
+static void clk_req_rate_test_forgotten_with_last_consumer(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *p0 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[0].hw,
+					      NULL);
+	struct clk *div;
+	int ret;
+
+	div = clk_hw_get_clk(&ctx->div_ctx.hw, NULL);
+	ret = clk_set_rate(div, DIV_ROUND_UP(DUMMY_CLOCK_RATE_1, 2));
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	clk_put(div);
+
+	ret = clk_set_rate(p0, DUMMY_CLOCK_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	ret = clk_set_rate_range(div, DUMMY_CLOCK_INIT_RATE, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), DIV_ROUND_UP(DUMMY_CLOCK_RATE_2, 2));
+}
+
+/*
+ * Test that bringing a clock inside a new range is not taken as a request, so
+ * that widening the range again gives the clock back the rate asked of it.
+ */
+static void clk_req_rate_test_range_is_not_a_request(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *p0 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[0].hw,
+					      NULL);
+	int ret;
+
+	ret = clk_set_rate(p0, DUMMY_CLOCK_RATE_1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(p0, DUMMY_CLOCK_RATE_2, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test, clk_get_rate(p0), DUMMY_CLOCK_RATE_2);
+
+	ret = clk_set_rate_range(p0, 0, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(p0), DUMMY_CLOCK_RATE_1);
+}
+
+static struct kunit_case clk_req_rate_test_cases[] = {
+	KUNIT_CASE(clk_req_rate_test_range_without_request),
+	KUNIT_CASE(clk_req_rate_test_request_survives_parent_switch),
+	KUNIT_CASE(clk_req_rate_test_set_parent_supersedes_request),
+	KUNIT_CASE(clk_req_rate_test_forgotten_with_last_consumer),
+	KUNIT_CASE(clk_req_rate_test_range_is_not_a_request),
+	{}
+};
+
+/*
+ * Test suite for the rate a consumer asked a clock for.
+ *
+ * These tests exercise what the framework goes back to when a range change
+ * forces it to choose a rate again.
+ */
+static struct kunit_suite clk_req_rate_test_suite = {
+	.name = "clk-req-rate",
+	.init = clk_req_rate_test_init,
+	.test_cases = clk_req_rate_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
@@ -4055,6 +4256,7 @@ kunit_test_suites(
 	&clk_range_test_suite,
 	&clk_range_maximize_test_suite,
 	&clk_range_minimize_test_suite,
+	&clk_req_rate_test_suite,
 	&clk_register_clk_parent_data_of_suite,
 	&clk_register_clk_parent_data_device_suite,
 	&clk_single_parent_mux_test_suite,

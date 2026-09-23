@@ -79,10 +79,10 @@ struct clk_parent_map {
  * @num_parents:       Number of possible parents.
  * @new_parent_index:  Index of the new parent during parent change operations.
  * @rate:              Current cached clock rate (Hz).
- * @req_rate:          The last rate requested by a call to clk_set_rate(). It's
- *                     initialized to clk_core->rate. It's also updated to
- *                     clk_core->rate every time the clock is reparented, and
- *                     when we're doing the orphan -> !orphan transition.
+ * @req_rate:          The last rate requested by a call to clk_set_rate(), or
+ *                     zero when there is none: no consumer asked for a rate
+ *                     since the clock was given its parent by
+ *                     clk_set_parent(), or the last consumer is gone.
  * @new_rate:          New rate to be set during a rate change operation.
  * @new_parent:        Pointer to new parent during parent change. This is also
  *                     used when a clk's rate is changed.
@@ -1992,7 +1992,6 @@ static unsigned long clk_recalc(struct clk_core *core,
 /**
  * __clk_recalc_rates - recalculate all rates in the clk subtree
  * @core: first clk in the subtree
- * @update_req: Whether req_rate should be updated with the new rate
  * @msg: notification type (see include/linux/clk.h)
  *
  * Walks the subtree of clks starting with @core and recalculates rates as it
@@ -2002,8 +2001,7 @@ static unsigned long clk_recalc(struct clk_core *core,
  * __clk_recalc_rates also propagates the POST_RATE_CHANGE notification,
  * if necessary.
  */
-static void __clk_recalc_rates(struct clk_core *core, bool update_req,
-			       unsigned long msg)
+static void __clk_recalc_rates(struct clk_core *core, unsigned long msg)
 {
 	unsigned long old_rate;
 	unsigned long parent_rate = 0;
@@ -2017,8 +2015,6 @@ static void __clk_recalc_rates(struct clk_core *core, bool update_req,
 		parent_rate = core->parent->rate;
 
 	core->rate = clk_recalc(core, parent_rate);
-	if (update_req)
-		core->req_rate = core->rate;
 
 	/*
 	 * ignore NOTIFY_STOP and NOTIFY_BAD return values for POST_RATE_CHANGE
@@ -2028,13 +2024,13 @@ static void __clk_recalc_rates(struct clk_core *core, bool update_req,
 		__clk_notify(core, msg, old_rate, core->rate);
 
 	hlist_for_each_entry(child, &core->children, child_node)
-		__clk_recalc_rates(child, update_req, msg);
+		__clk_recalc_rates(child, msg);
 }
 
 static unsigned long clk_core_get_rate_recalc(struct clk_core *core)
 {
 	if (core && (core->flags & CLK_GET_RATE_NOCACHE))
-		__clk_recalc_rates(core, false, 0);
+		__clk_recalc_rates(core, 0);
 
 	return clk_core_get_rate_nolock(core);
 }
@@ -2624,7 +2620,6 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	/* change the rates */
 	clk_change_rate(top);
 
-	core->req_rate = req_rate;
 err:
 	clk_pm_runtime_put(core);
 
@@ -2667,6 +2662,8 @@ int clk_set_rate(struct clk *clk, unsigned long rate)
 		clk_core_rate_unprotect(clk->core);
 
 	ret = clk_core_set_rate_nolock(clk->core, rate);
+	if (!ret)
+		clk->core->req_rate = rate;
 
 	if (clk->exclusive_count)
 		clk_core_rate_protect(clk->core);
@@ -2714,6 +2711,7 @@ int clk_set_rate_exclusive(struct clk *clk, unsigned long rate)
 
 	ret = clk_core_set_rate_nolock(clk->core, rate);
 	if (!ret) {
+		clk->core->req_rate = rate;
 		clk_core_rate_protect(clk->core);
 		clk->exclusive_count++;
 	}
@@ -2760,7 +2758,7 @@ static int clk_set_rate_range_nolock(struct clk *clk,
 	}
 
 	rate = clk->core->req_rate;
-	if (clk->core->flags & CLK_GET_RATE_NOCACHE)
+	if (!rate || (clk->core->flags & CLK_GET_RATE_NOCACHE))
 		rate = clk_core_get_rate_recalc(clk->core);
 
 	/*
@@ -2918,7 +2916,7 @@ static void clk_core_reparent(struct clk_core *core,
 {
 	clk_reparent(core, new_parent);
 	__clk_recalc_accuracies(core);
-	__clk_recalc_rates(core, true, POST_RATE_CHANGE);
+	__clk_recalc_rates(core, POST_RATE_CHANGE);
 }
 
 void clk_hw_reparent(struct clk_hw *hw, struct clk_hw *new_parent)
@@ -3002,10 +3000,17 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 
 	/* propagate rate an accuracy recalculation accordingly */
 	if (ret) {
-		__clk_recalc_rates(core, true, ABORT_RATE_CHANGE);
+		__clk_recalc_rates(core, ABORT_RATE_CHANGE);
 	} else {
-		__clk_recalc_rates(core, true, POST_RATE_CHANGE);
+		__clk_recalc_rates(core, POST_RATE_CHANGE);
 		__clk_recalc_accuracies(core);
+
+		/*
+		 * Choosing the source of a clock supersedes the rate it was
+		 * asked for, or a later range change would ask for that rate
+		 * again and could move the clock back.
+		 */
+		core->req_rate = 0;
 	}
 
 runtime_put:
@@ -3540,6 +3545,8 @@ static int clk_rate_set(void *data, u64 val)
 
 	clk_prepare_lock();
 	ret = clk_core_set_rate_nolock(core, val);
+	if (!ret)
+		core->req_rate = val;
 	clk_prepare_unlock();
 
 	return ret;
@@ -3956,20 +3963,7 @@ static void clk_core_reparent_orphans_nolock(void)
 			__clk_set_parent_before(orphan, parent);
 			__clk_set_parent_after(orphan, parent, NULL);
 			__clk_recalc_accuracies(orphan);
-			__clk_recalc_rates(orphan, true, 0);
-
-			/*
-			 * __clk_init_parent() will set the initial req_rate to
-			 * 0 if the clock doesn't have clk_ops::recalc_rate and
-			 * is an orphan when it's registered.
-			 *
-			 * 'req_rate' is used by clk_set_rate_range() and
-			 * clk_put() to trigger a clk_set_rate() call whenever
-			 * the boundaries are modified. Let's make sure
-			 * 'req_rate' is set to something non-zero so that
-			 * clk_set_rate_range() doesn't drop the frequency.
-			 */
-			orphan->req_rate = orphan->rate;
+			__clk_recalc_rates(orphan, 0);
 		}
 	}
 }
@@ -4139,7 +4133,7 @@ static int __clk_core_init(struct clk_core *core)
 		rate = parent->rate;
 	else
 		rate = 0;
-	core->rate = core->req_rate = rate;
+	core->rate = rate;
 
 	/*
 	 * Enable CLK_IS_CRITICAL clocks so newly added critical clocks
@@ -4199,8 +4193,21 @@ static void clk_core_link_consumer(struct clk_core *core, struct clk *clk)
  */
 static void clk_core_unlink_consumer(struct clk *clk)
 {
+	struct clk_core *core = clk->core;
+	struct clk *user;
+
 	lockdep_assert_held(&prepare_lock);
 	hlist_del(&clk->clks_node);
+
+	/*
+	 * Forget the requested rate once every consumer is gone. The provider's
+	 * own handle lives as long as the clock and does not count.
+	 */
+	hlist_for_each_entry(user, &core->clks, clks_node)
+		if (user != core->hw->clk)
+			return;
+
+	core->req_rate = 0;
 }
 
 /**
