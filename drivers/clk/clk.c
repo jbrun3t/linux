@@ -2314,7 +2314,8 @@ out:
 }
 
 static void clk_calc_subtree(struct clk_core *core, unsigned long new_rate,
-			     struct clk_core *new_parent, u8 p_index)
+			     struct clk_core *new_parent, u8 p_index,
+			     struct clk_core *from)
 {
 	struct clk_core *child;
 
@@ -2327,13 +2328,20 @@ static void clk_calc_subtree(struct clk_core *core, unsigned long new_rate,
 		new_parent->new_child = core;
 
 	hlist_for_each_entry(child, &core->children, child_node) {
+		if (child == from)
+			continue;
+
 		child->new_rate = clk_recalc(child, new_rate);
-		clk_calc_subtree(child, child->new_rate, NULL, 0);
+		clk_calc_subtree(child, child->new_rate, NULL, 0, NULL);
 	}
 }
 
 /*
  * Calculate the new rates returning the topmost clock that has to be changed.
+ *
+ * @from is the child this call propagates up from, if any. That child plans
+ * its own branch once the propagation returns, so the subtree walk here leaves
+ * it out.
  *
  * @min_rate and @max_rate are the boundaries of the pass-through clocks this
  * call propagates up through. Those clocks run at the rate of @core, so their
@@ -2341,6 +2349,7 @@ static void clk_calc_subtree(struct clk_core *core, unsigned long new_rate,
  */
 static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 					   unsigned long rate,
+					   struct clk_core *from,
 					   unsigned long min_rate,
 					   unsigned long max_rate)
 {
@@ -2393,7 +2402,7 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 		return NULL;
 	} else {
 		/* pass-through clock with adjustable parent */
-		top = clk_calc_new_rates(parent, rate, min_rate, max_rate);
+		top = clk_calc_new_rates(parent, rate, core, min_rate, max_rate);
 		new_rate = parent->new_rate;
 		goto out;
 	}
@@ -2418,11 +2427,11 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 
 	if ((core->flags & CLK_SET_RATE_PARENT) && parent &&
 	    best_parent_rate != parent->rate)
-		top = clk_calc_new_rates(parent, best_parent_rate, 0,
-					 ULONG_MAX);
+		top = clk_calc_new_rates(parent, best_parent_rate, core,
+					 0, ULONG_MAX);
 
 out:
-	clk_calc_subtree(core, new_rate, parent, p_index);
+	clk_calc_subtree(core, new_rate, parent, p_index, from);
 
 	return top;
 }
@@ -2538,7 +2547,7 @@ static int clk_change_rate(struct clk_core *core)
 		__clk_notify(core, POST_RATE_CHANGE, old_rate, core->rate);
 
 	if (core->flags & CLK_RECALC_NEW_RATES)
-		(void)clk_calc_new_rates(core, core->new_rate, 0, ULONG_MAX);
+		(void)clk_calc_new_rates(core, core->new_rate, NULL, 0, ULONG_MAX);
 
 	/*
 	 * Use safe iteration, as change_rate can actually swap parents
@@ -2630,7 +2639,7 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 		return -EBUSY;
 
 	/* calculate new rates and get the topmost changed clock */
-	top = clk_calc_new_rates(core, req_rate, 0, ULONG_MAX);
+	top = clk_calc_new_rates(core, req_rate, NULL, 0, ULONG_MAX);
 	if (!top)
 		return -EINVAL;
 
