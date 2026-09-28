@@ -4239,6 +4239,150 @@ static struct kunit_suite clk_req_rate_test_suite = {
 	.test_cases = clk_req_rate_test_cases,
 };
 
+/*
+ * A mux that counts how it is programmed and can be told to refuse switching,
+ * with a divider below it:
+ *
+ *	parent-0   parent-1
+ *	     \       /
+ *	   switch-mux
+ *	        |
+ *	    switch-div
+ */
+struct clk_switch_ctx {
+	struct clk_multiple_parent_ctx mux_ctx;
+	struct clk_dummy_div_context div_ctx;
+	bool refuse;
+	unsigned int set_parent_calls;
+	unsigned int set_rate_calls;
+	unsigned int set_rate_and_parent_calls;
+};
+
+static struct clk_switch_ctx *clk_switch_ctx(struct clk_hw *hw)
+{
+	return container_of(hw, struct clk_switch_ctx, mux_ctx.hw);
+}
+
+static int clk_switch_set_parent(struct clk_hw *hw, u8 index)
+{
+	struct clk_switch_ctx *ctx = clk_switch_ctx(hw);
+
+	ctx->set_parent_calls++;
+	if (ctx->refuse)
+		return -EIO;
+
+	return clk_multiple_parents_mux_set_parent(hw, index);
+}
+
+static int clk_switch_set_rate_and_parent(struct clk_hw *hw, unsigned long rate,
+					  unsigned long parent_rate, u8 index)
+{
+	struct clk_switch_ctx *ctx = clk_switch_ctx(hw);
+
+	ctx->set_rate_and_parent_calls++;
+	if (ctx->refuse)
+		return -EIO;
+
+	return clk_multiple_parents_mux_set_parent(hw, index);
+}
+
+static int clk_switch_set_rate(struct clk_hw *hw, unsigned long rate,
+			       unsigned long parent_rate)
+{
+	clk_switch_ctx(hw)->set_rate_calls++;
+
+	return 0;
+}
+
+static unsigned long clk_switch_recalc_rate(struct clk_hw *hw,
+					    unsigned long parent_rate)
+{
+	return parent_rate;
+}
+
+static const struct clk_ops clk_switch_ops = {
+	.get_parent = clk_multiple_parents_mux_get_parent,
+	.set_parent = clk_switch_set_parent,
+	.set_rate_and_parent = clk_switch_set_rate_and_parent,
+	.set_rate = clk_switch_set_rate,
+	.recalc_rate = clk_switch_recalc_rate,
+	.determine_rate = __clk_mux_determine_rate_closest,
+};
+
+static int clk_switch_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "parent-0", "parent-1" };
+	struct clk_switch_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->mux_ctx.parents_ctx[0].rate = DUMMY_CLOCK_RATE_1;
+	ctx->mux_ctx.parents_ctx[0].hw.init =
+		CLK_HW_INIT_NO_PARENT("parent-0", &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.parents_ctx[0].hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.parents_ctx[1].rate = DUMMY_CLOCK_RATE_2;
+	ctx->mux_ctx.parents_ctx[1].hw.init =
+		CLK_HW_INIT_NO_PARENT("parent-1", &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.parents_ctx[1].hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.current_parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("switch-mux", parents,
+						   &clk_switch_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 1;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("switch-div", &ctx->mux_ctx.hw,
+					      &clk_dummy_div_ops, 0);
+	return clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+}
+
+/*
+ * Test that a parent switch the hardware refuses in the middle of
+ * clk_set_rate() is reported, and leaves the mux where it was.
+ */
+static void clk_switch_test_set_rate_refused(struct kunit *test)
+{
+	struct clk_switch_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	int ret;
+
+	ctx->refuse = true;
+	ret = clk_set_rate(mux, DUMMY_CLOCK_RATE_2);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->mux_ctx.parents_ctx[0].hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), DUMMY_CLOCK_RATE_1);
+}
+
+static struct kunit_case clk_switch_test_cases[] = {
+	KUNIT_CASE(clk_switch_test_set_rate_refused),
+	{}
+};
+
+/*
+ * Test suite for switching a mux.
+ *
+ * These tests exercise how a parent switch is programmed, and what happens
+ * when the hardware refuses it.
+ */
+static struct kunit_suite clk_switch_test_suite = {
+	.name = "clk-switch",
+	.init = clk_switch_test_init,
+	.test_cases = clk_switch_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
@@ -4260,6 +4404,7 @@ kunit_test_suites(
 	&clk_register_clk_parent_data_of_suite,
 	&clk_register_clk_parent_data_device_suite,
 	&clk_single_parent_mux_test_suite,
+	&clk_switch_test_suite,
 	&clk_uncached_test_suite,
 );
 MODULE_DESCRIPTION("Kunit tests for clk framework");

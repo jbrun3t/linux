@@ -2225,8 +2225,16 @@ static void __clk_set_parent_after(struct clk_core *core,
 	}
 }
 
+/*
+ * Switch @core to @parent, and put the tree back if the hardware refuses.
+ *
+ * With a non-zero @rate and a provider implementing set_rate_and_parent(),
+ * @rate is programmed together with the switch, @parent_rate being the rate
+ * @parent runs at.
+ */
 static int __clk_set_parent(struct clk_core *core, struct clk_core *parent,
-			    u8 p_index)
+			    u8 p_index, unsigned long rate,
+			    unsigned long parent_rate)
 {
 	unsigned long flags;
 	int ret = 0;
@@ -2237,7 +2245,10 @@ static int __clk_set_parent(struct clk_core *core, struct clk_core *parent,
 	trace_clk_set_parent(core, parent);
 
 	/* change clock input source */
-	if (parent && core->ops->set_parent)
+	if (parent && rate && core->ops->set_rate_and_parent)
+		ret = core->ops->set_rate_and_parent(core->hw, rate,
+						     parent_rate, p_index);
+	else if (parent && core->ops->set_parent)
 		ret = core->ops->set_parent(core->hw, p_index);
 
 	trace_clk_set_parent_complete(core, parent);
@@ -2456,18 +2467,22 @@ static struct clk_core *clk_propagate_rate_change(struct clk_core *core,
 }
 
 /*
- * walk down a subtree and set the new rates notifying the rate
- * change on the way
+ * Walk down a subtree and set the new rates, notifying the rate change on the
+ * way.
+ *
+ * A clock whose parent switch is refused stays on its old parent, and it and
+ * the clocks below it are told the change is aborted. The rest of the subtree
+ * is still programmed. The first error met is returned.
  */
-static void clk_change_rate(struct clk_core *core)
+static int clk_change_rate(struct clk_core *core)
 {
 	struct clk_core *child;
 	struct hlist_node *tmp;
 	unsigned long old_rate;
 	unsigned long best_parent_rate = 0;
 	bool skip_set_rate = false;
-	struct clk_core *old_parent;
 	struct clk_core *parent = NULL;
+	int ret, err;
 
 	old_rate = core->rate;
 
@@ -2479,8 +2494,9 @@ static void clk_change_rate(struct clk_core *core)
 		best_parent_rate = core->parent->rate;
 	}
 
-	if (clk_pm_runtime_get(core))
-		return;
+	ret = clk_pm_runtime_get(core);
+	if (ret)
+		goto abort;
 
 	if (core->flags & CLK_SET_RATE_UNGATE) {
 		clk_core_prepare(core);
@@ -2488,20 +2504,14 @@ static void clk_change_rate(struct clk_core *core)
 	}
 
 	if (core->new_parent && core->new_parent != core->parent) {
-		old_parent = __clk_set_parent_before(core, core->new_parent);
-		trace_clk_set_parent(core, core->new_parent);
+		ret = __clk_set_parent(core, core->new_parent,
+				       core->new_parent_index, core->new_rate,
+				       best_parent_rate);
+		if (ret)
+			goto ungate;
 
-		if (core->ops->set_rate_and_parent) {
+		if (core->ops->set_rate_and_parent)
 			skip_set_rate = true;
-			core->ops->set_rate_and_parent(core->hw, core->new_rate,
-					best_parent_rate,
-					core->new_parent_index);
-		} else if (core->ops->set_parent) {
-			core->ops->set_parent(core->hw, core->new_parent_index);
-		}
-
-		trace_clk_set_parent_complete(core, core->new_parent);
-		__clk_set_parent_after(core, core->new_parent, old_parent);
 	}
 
 	if (core->flags & CLK_OPS_PARENT_ENABLE)
@@ -2538,14 +2548,35 @@ static void clk_change_rate(struct clk_core *core)
 		/* Skip children who will be reparented to another clock */
 		if (child->new_parent && child->new_parent != core)
 			continue;
-		clk_change_rate(child);
+
+		err = clk_change_rate(child);
+		if (err && !ret)
+			ret = err;
 	}
 
 	/* handle the new child who might not be in core->children yet */
-	if (core->new_child)
-		clk_change_rate(core->new_child);
+	if (core->new_child) {
+		err = clk_change_rate(core->new_child);
+		if (err && !ret)
+			ret = err;
+	}
 
 	clk_pm_runtime_put(core);
+
+	return ret;
+
+ungate:
+	if (core->flags & CLK_SET_RATE_UNGATE) {
+		clk_core_disable_lock(core);
+		clk_core_unprepare(core);
+	}
+
+	clk_pm_runtime_put(core);
+abort:
+	pr_debug("%s: %s could not be changed: %d\n", __func__, core->name, ret);
+	clk_propagate_rate_change(core, ABORT_RATE_CHANGE);
+
+	return ret;
 }
 
 static unsigned long clk_core_req_round_rate_nolock(struct clk_core *core,
@@ -2618,7 +2649,7 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	}
 
 	/* change the rates */
-	clk_change_rate(top);
+	ret = clk_change_rate(top);
 
 err:
 	clk_pm_runtime_put(core);
@@ -2996,7 +3027,7 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 		goto runtime_put;
 
 	/* do the re-parent */
-	ret = __clk_set_parent(core, parent, p_index);
+	ret = __clk_set_parent(core, parent, p_index, 0, 0);
 
 	/* propagate rate an accuracy recalculation accordingly */
 	if (ret) {
