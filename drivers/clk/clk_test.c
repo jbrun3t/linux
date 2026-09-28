@@ -4239,6 +4239,27 @@ static struct kunit_suite clk_req_rate_test_suite = {
 	.test_cases = clk_req_rate_test_cases,
 };
 
+struct clk_event_counter {
+	struct notifier_block nb;
+	unsigned int pre, post, abort;
+};
+
+static int clk_event_counter_cb(struct notifier_block *nb,
+				unsigned long action, void *data)
+{
+	struct clk_event_counter *counter =
+		container_of(nb, struct clk_event_counter, nb);
+
+	if (action == PRE_RATE_CHANGE)
+		counter->pre++;
+	else if (action == POST_RATE_CHANGE)
+		counter->post++;
+	else if (action == ABORT_RATE_CHANGE)
+		counter->abort++;
+
+	return NOTIFY_OK;
+}
+
 /*
  * A mux that counts how it is programmed and can be told to refuse switching,
  * with a divider below it:
@@ -4348,6 +4369,72 @@ static int clk_switch_test_init(struct kunit *test)
 }
 
 /*
+ * Test that clk_set_parent() only switches the mux, with set_parent(), and
+ * does not program its rate.
+ */
+static void clk_switch_test_set_parent_only_switches(struct kunit *test)
+{
+	struct clk_switch_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *p1 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[1].hw,
+					      NULL);
+	int ret;
+
+	ret = clk_set_parent(mux, p1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, ctx->set_parent_calls, 1);
+	KUNIT_EXPECT_EQ(test, ctx->set_rate_calls, 0);
+	KUNIT_EXPECT_EQ(test, ctx->set_rate_and_parent_calls, 0);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), DUMMY_CLOCK_RATE_2);
+}
+
+/*
+ * Test that a switch the hardware refuses is reported by clk_set_parent(),
+ * leaves the mux and the clock below it where they were, and tells both that
+ * the change they were warned about is not happening.
+ */
+static void clk_switch_test_set_parent_refused(struct kunit *test)
+{
+	struct clk_switch_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *p1 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[1].hw,
+					      NULL);
+	struct clk_event_counter mux_events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	struct clk_event_counter div_events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	int ret;
+
+	ret = clk_notifier_register(mux, &mux_events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(div, &div_events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->refuse = true;
+	ret = clk_set_parent(mux, p1);
+	KUNIT_EXPECT_EQ(test, ret, -EIO);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->mux_ctx.parents_ctx[0].hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), DUMMY_CLOCK_RATE_1);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), DUMMY_CLOCK_RATE_1);
+
+	KUNIT_EXPECT_EQ(test, mux_events.pre, 1);
+	KUNIT_EXPECT_EQ(test, mux_events.abort, 1);
+	KUNIT_EXPECT_EQ(test, mux_events.post, 0);
+	KUNIT_EXPECT_EQ(test, div_events.pre, 1);
+	KUNIT_EXPECT_EQ(test, div_events.abort, 1);
+	KUNIT_EXPECT_EQ(test, div_events.post, 0);
+
+	clk_notifier_unregister(div, &div_events.nb);
+	clk_notifier_unregister(mux, &mux_events.nb);
+}
+
+/*
  * Test that a parent switch the hardware refuses in the middle of
  * clk_set_rate() is reported, and leaves the mux where it was.
  */
@@ -4367,6 +4454,8 @@ static void clk_switch_test_set_rate_refused(struct kunit *test)
 }
 
 static struct kunit_case clk_switch_test_cases[] = {
+	KUNIT_CASE(clk_switch_test_set_parent_only_switches),
+	KUNIT_CASE(clk_switch_test_set_parent_refused),
 	KUNIT_CASE(clk_switch_test_set_rate_refused),
 	{}
 };

@@ -2485,18 +2485,23 @@ static struct clk_core *clk_propagate_rate_change(struct clk_core *core,
  * Walk down a subtree and set the new rates, notifying the rate change on the
  * way.
  *
+ * With @switch_only, @core is only switched to its new parent, with
+ * set_parent(), and its rate is not programmed. The clocks below it are
+ * programmed as usual.
+ *
  * A clock whose parent switch is refused stays on its old parent, and it and
  * the clocks below it are told the change is aborted. The rest of the subtree
  * is still programmed. The first error met is returned.
  */
-static int clk_change_rate(struct clk_core *core)
+static int clk_change_rate(struct clk_core *core, bool switch_only)
 {
 	struct clk_core *child;
 	struct hlist_node *tmp;
 	unsigned long old_rate;
 	unsigned long best_parent_rate = 0;
-	bool skip_set_rate = false;
+	bool skip_set_rate = switch_only;
 	struct clk_core *parent = NULL;
+	bool ungated;
 	int ret, err;
 
 	old_rate = core->rate;
@@ -2513,19 +2518,21 @@ static int clk_change_rate(struct clk_core *core)
 	if (ret)
 		goto abort;
 
-	if (core->flags & CLK_SET_RATE_UNGATE) {
+	ungated = !switch_only && (core->flags & CLK_SET_RATE_UNGATE);
+	if (ungated) {
 		clk_core_prepare(core);
 		clk_core_enable_lock(core);
 	}
 
 	if (core->new_parent && core->new_parent != core->parent) {
 		ret = __clk_set_parent(core, core->new_parent,
-				       core->new_parent_index, core->new_rate,
+				       core->new_parent_index,
+				       switch_only ? 0 : core->new_rate,
 				       best_parent_rate);
 		if (ret)
 			goto ungate;
 
-		if (core->ops->set_rate_and_parent)
+		if (!switch_only && core->ops->set_rate_and_parent)
 			skip_set_rate = true;
 	}
 
@@ -2541,7 +2548,7 @@ static int clk_change_rate(struct clk_core *core)
 
 	core->rate = clk_recalc(core, best_parent_rate);
 
-	if (core->flags & CLK_SET_RATE_UNGATE) {
+	if (ungated) {
 		clk_core_disable_lock(core);
 		clk_core_unprepare(core);
 	}
@@ -2564,14 +2571,14 @@ static int clk_change_rate(struct clk_core *core)
 		if (child->new_parent && child->new_parent != core)
 			continue;
 
-		err = clk_change_rate(child);
+		err = clk_change_rate(child, false);
 		if (err && !ret)
 			ret = err;
 	}
 
 	/* handle the new child who might not be in core->children yet */
 	if (core->new_child) {
-		err = clk_change_rate(core->new_child);
+		err = clk_change_rate(core->new_child, false);
 		if (err && !ret)
 			ret = err;
 	}
@@ -2581,7 +2588,7 @@ static int clk_change_rate(struct clk_core *core)
 	return ret;
 
 ungate:
-	if (core->flags & CLK_SET_RATE_UNGATE) {
+	if (ungated) {
 		clk_core_disable_lock(core);
 		clk_core_unprepare(core);
 	}
@@ -2624,10 +2631,37 @@ static unsigned long clk_core_req_round_rate_nolock(struct clk_core *core,
 	return ret ? 0 : req.rate;
 }
 
+/*
+ * Apply a plan from @top: tell the clocks it changes what is about to happen,
+ * let them refuse, then program them. Every clock below @top carries its
+ * planned rate in new_rate. With @switch_only, @top is only switched to its new
+ * parent.
+ *
+ * Refusing is only possible before anything is programmed. A parent switch the
+ * hardware refuses afterwards is reported, and only the clocks below it are
+ * left out: when it is @top's own, nothing has changed.
+ */
+static int clk_core_commit_rates(struct clk_core *top, bool switch_only)
+{
+	struct clk_core *fail_clk;
+
+	lockdep_assert_held(&prepare_lock);
+
+	fail_clk = clk_propagate_rate_change(top, PRE_RATE_CHANGE);
+	if (fail_clk) {
+		pr_debug("%s: %s refused the rate change\n", __func__,
+			 fail_clk->name);
+		clk_propagate_rate_change(top, ABORT_RATE_CHANGE);
+		return -EBUSY;
+	}
+
+	return clk_change_rate(top, switch_only);
+}
+
 static int clk_core_set_rate_nolock(struct clk_core *core,
 				    unsigned long req_rate)
 {
-	struct clk_core *top, *fail_clk;
+	struct clk_core *top;
 	unsigned long rate;
 	int ret;
 
@@ -2653,20 +2687,8 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	if (ret)
 		return ret;
 
-	/* notify that we are about to change rates */
-	fail_clk = clk_propagate_rate_change(top, PRE_RATE_CHANGE);
-	if (fail_clk) {
-		pr_debug("%s: failed to set %s rate\n", __func__,
-				fail_clk->name);
-		clk_propagate_rate_change(top, ABORT_RATE_CHANGE);
-		ret = -EBUSY;
-		goto err;
-	}
+	ret = clk_core_commit_rates(top, false);
 
-	/* change the rates */
-	ret = clk_change_rate(top);
-
-err:
 	clk_pm_runtime_put(core);
 
 	return ret;
@@ -3034,21 +3056,29 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 	if (ret)
 		return ret;
 
-	/* propagate PRE_RATE_CHANGE notifications */
-	ret = __clk_speculate_rates(core, p_rate);
+	if (parent) {
+		/* the subtree keeps its settings and follows the new parent */
+		clk_calc_subtree(core, clk_recalc(core, parent->rate), parent,
+				 p_index, NULL);
 
-	/* abort if a driver objects */
-	if (ret & NOTIFY_STOP_MASK)
-		goto runtime_put;
+		/* the commit starts at @core, the new parent need not lead to it */
+		parent->new_child = NULL;
 
-	/* do the re-parent */
-	ret = __clk_set_parent(core, parent, p_index, 0, 0);
-
-	/* propagate rate an accuracy recalculation accordingly */
-	if (ret) {
-		__clk_recalc_rates(core, ABORT_RATE_CHANGE);
+		ret = clk_core_commit_rates(core, true);
 	} else {
-		__clk_recalc_rates(core, POST_RATE_CHANGE);
+		/* propagate PRE_RATE_CHANGE notifications */
+		ret = __clk_speculate_rates(core, p_rate);
+
+		/* abort if a driver objects */
+		if (ret & NOTIFY_STOP_MASK)
+			goto runtime_put;
+
+		ret = __clk_set_parent(core, NULL, 0, 0, 0);
+		__clk_recalc_rates(core, ret ? ABORT_RATE_CHANGE :
+					       POST_RATE_CHANGE);
+	}
+
+	if (!ret) {
 		__clk_recalc_accuracies(core);
 
 		/*
