@@ -4383,6 +4383,60 @@ static struct kunit_suite clk_switch_test_suite = {
 	.test_cases = clk_switch_test_cases,
 };
 
+/*
+ * Test that the protection of an orphan follows it to the parent it finds:
+ * once registered, that parent cannot be moved from under it, and releasing
+ * the protection releases it on the parent too.
+ */
+static void clk_protect_reparent_test_orphan_adopted(struct kunit *test)
+{
+	struct clk_dummy_context *parent;
+	struct clk *orphan_clk, *parent_clk;
+	struct clk_hw *orphan;
+	int ret;
+
+	parent = kunit_kzalloc(test, sizeof(*parent), GFP_KERNEL);
+	orphan = kunit_kzalloc(test, sizeof(*orphan), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, parent);
+	KUNIT_ASSERT_NOT_NULL(test, orphan);
+
+	orphan->init = CLK_HW_INIT("protect-orphan", "protect-parent",
+				   &empty_clk_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, orphan);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	orphan_clk = clk_hw_get_clk_kunit(test, orphan, NULL);
+	ret = clk_rate_exclusive_get(orphan_clk);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	parent->rate = DUMMY_CLOCK_RATE_1;
+	parent->hw.init = CLK_HW_INIT_NO_PARENT("protect-parent",
+						&clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &parent->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	parent_clk = clk_hw_get_clk_kunit(test, &parent->hw, NULL);
+	KUNIT_EXPECT_EQ(test, clk_set_rate(parent_clk, DUMMY_CLOCK_RATE_2), -EBUSY);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent_clk), DUMMY_CLOCK_RATE_1);
+
+	clk_rate_exclusive_put(orphan_clk);
+
+	KUNIT_EXPECT_EQ(test, clk_set_rate(parent_clk, DUMMY_CLOCK_RATE_2), 0);
+}
+
+static struct kunit_case clk_protect_reparent_test_cases[] = {
+	KUNIT_CASE(clk_protect_reparent_test_orphan_adopted),
+	{}
+};
+
+/*
+ * Test suite for the protection of a clock moving to another parent.
+ */
+static struct kunit_suite clk_protect_reparent_test_suite = {
+	.name = "clk-protect-reparent",
+	.test_cases = clk_protect_reparent_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
@@ -4396,6 +4450,7 @@ kunit_test_suites(
 	&clk_orphan_transparent_multiple_parent_mux_test_suite,
 	&clk_orphan_transparent_single_parent_test_suite,
 	&clk_pass_through_test_suite,
+	&clk_protect_reparent_test_suite,
 	&clk_orphan_two_level_root_last_test_suite,
 	&clk_range_test_suite,
 	&clk_range_maximize_test_suite,

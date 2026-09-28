@@ -2137,6 +2137,12 @@ static void clk_reparent(struct clk_core *core, struct clk_core *new_parent)
 {
 	bool was_orphan = core->orphan;
 
+	/* the protection held at or below the clock moves with it */
+	if (core->protect_count) {
+		clk_core_rate_unprotect(core->parent);
+		clk_core_rate_protect(new_parent);
+	}
+
 	hlist_del(&core->child_node);
 
 	if (new_parent) {
