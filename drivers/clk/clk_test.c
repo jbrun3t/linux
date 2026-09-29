@@ -6034,9 +6034,191 @@ static struct kunit_suite clk_range_warn_test_suite = {
 	.test_cases = clk_range_warn_test_cases,
 };
 
+/*
+ * A mux held at 32MHz on a clock another branch is about to move, able to step
+ * aside to a clock that has to be moved to take it:
+ *
+ *	cascade-parent		cascade-alt (96MHz)
+ *	  /	    \		    |
+ *   cascade-div     `--- cascade-mux ---'
+ */
+struct clk_cascade_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_context alt_ctx;
+	struct clk_dummy_div_context div_ctx;
+	struct clk_step_aside_mux_ctx mux_ctx;
+};
+
+static int clk_cascade_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "cascade-parent", "cascade-alt" };
+	struct clk_cascade_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("cascade-parent",
+							&clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->alt_ctx.rate = 6 * STEP_CLOCK_STEP;
+	ctx->alt_ctx.hw.init = CLK_HW_INIT_NO_PARENT("cascade-alt",
+						     &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->alt_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 1;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("cascade-div", &ctx->parent_ctx.hw,
+					      &clk_dummy_div_parent_ops,
+					      CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("cascade-mux", parents,
+						   &clk_step_aside_mux_ops,
+						   CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+}
+
+/*
+ * Test that stepping aside works when the parent stepped aside to has to be
+ * moved to take the clock, which makes that move part of the same change, and
+ * that the mux is never told of a change: the parent it moves to reaches
+ * 32MHz before it moves, and it moves before the parent it leaves does.
+ */
+static void clk_cascade_test_moves_the_parent_it_leaves_for(struct kunit *test)
+{
+	struct clk_cascade_ctx *ctx = test->priv;
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *alt = clk_hw_get_clk_kunit(test, &ctx->alt_ctx.hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	struct clk_event_counter events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	int ret;
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(mux, &events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->mux_ctx.set_rate_calls = 0;
+
+	ret = clk_set_rate(div, 24 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* the mux is switched once, from one place */
+	KUNIT_EXPECT_EQ(test, ctx->mux_ctx.set_rate_calls, 1);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), 3 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->alt_ctx.hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(alt), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, events.pre + events.post + events.abort, 0);
+
+	clk_notifier_unregister(mux, &events.nb);
+}
+
+/*
+ * Test that the parent a clock steps aside to is not moved out of the range
+ * its own consumer holds it in, and that the change is refused when nothing
+ * else suits.
+ */
+static void clk_cascade_test_held_parent_not_moved(struct kunit *test)
+{
+	struct clk_cascade_ctx *ctx = test->priv;
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *alt = clk_hw_get_clk_kunit(test, &ctx->alt_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_test_hold(alt, 6 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div, 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(alt), 6 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->parent_ctx.hw);
+}
+
+/*
+ * Test that a clock with a range below the parent a clock switches
+ * to is worked out again when that parent moves to take it: the divider under
+ * cascade-alt goes from /3 to /1 to stay at 32MHz.
+ */
+static void clk_cascade_test_new_parent_child_updated(struct kunit *test)
+{
+	struct clk_cascade_ctx *ctx = test->priv;
+	struct clk_dummy_div_context *child;
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *alt = clk_hw_get_clk_kunit(test, &ctx->alt_ctx.hw, NULL);
+	struct clk *clk;
+	int ret;
+
+	child = kunit_kzalloc(test, sizeof(*child), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, child);
+	child->div = 3;
+	child->hw.init = CLK_HW_INIT_HW("cascade-alt-div", &ctx->alt_ctx.hw,
+					&clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &child->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	clk = clk_hw_get_clk_kunit(test, &child->hw, NULL);
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_test_hold(clk, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div, 24 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->alt_ctx.hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(alt), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, child->div, 1);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(clk), 2 * STEP_CLOCK_STEP);
+}
+
+static struct kunit_case clk_cascade_test_cases[] = {
+	KUNIT_CASE(clk_cascade_test_moves_the_parent_it_leaves_for),
+	KUNIT_CASE(clk_cascade_test_held_parent_not_moved),
+	KUNIT_CASE(clk_cascade_test_new_parent_child_updated),
+	{}
+};
+
+/*
+ * Test suite for a clock stepping aside to a parent that has to be moved to
+ * take it.
+ */
+static struct kunit_suite clk_cascade_test_suite = {
+	.name = "clk-cascade",
+	.init = clk_cascade_test_init,
+	.test_cases = clk_cascade_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
+	&clk_cascade_test_suite,
 	&clk_walking_test_suite,
 	&clk_escape_test_suite,
 	&clk_fork_test_suite,
