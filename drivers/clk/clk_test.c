@@ -5524,6 +5524,379 @@ static struct kunit_suite clk_walking_test_suite = {
 	.test_cases = clk_walking_test_cases,
 };
 
+struct clk_step_aside_mux_ctx {
+	struct clk_hw hw;
+	u8 parent;
+	unsigned int set_rate_calls;
+};
+
+static int clk_step_aside_mux_set_parent(struct clk_hw *hw, u8 index)
+{
+	struct clk_step_aside_mux_ctx *ctx =
+		container_of(hw, struct clk_step_aside_mux_ctx, hw);
+
+	if (index >= clk_hw_get_num_parents(hw))
+		return -EINVAL;
+
+	ctx->parent = index;
+
+	return 0;
+}
+
+static u8 clk_step_aside_mux_get_parent(struct clk_hw *hw)
+{
+	struct clk_step_aside_mux_ctx *ctx =
+		container_of(hw, struct clk_step_aside_mux_ctx, hw);
+
+	return ctx->parent;
+}
+
+/* Count how often the mux is programmed */
+static int clk_step_aside_mux_set_rate(struct clk_hw *hw, unsigned long rate,
+				       unsigned long parent_rate)
+{
+	struct clk_step_aside_mux_ctx *ctx =
+		container_of(hw, struct clk_step_aside_mux_ctx, hw);
+
+	ctx->set_rate_calls++;
+
+	return 0;
+}
+
+static const struct clk_ops clk_step_aside_mux_ops = {
+	.get_parent = clk_step_aside_mux_get_parent,
+	.set_parent = clk_step_aside_mux_set_parent,
+	.set_rate = clk_step_aside_mux_set_rate,
+	.determine_rate = __clk_mux_determine_rate_closest,
+};
+
+/*
+ * A mux held at 32MHz on a clock another branch is about to move, able to
+ * step aside to a clock that is not going anywhere:
+ *
+ *	escape-parent		escape-alt
+ *	  /	    \		    |
+ *   escape-div	     `--- escape-mux ---'
+ */
+struct clk_escape_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_context alt_ctx;
+	struct clk_dummy_div_context div_ctx;
+	struct clk_step_aside_mux_ctx mux_ctx;
+};
+
+static int clk_escape_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "escape-parent", "escape-alt" };
+	struct clk_escape_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("escape-parent",
+							&clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->alt_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->alt_ctx.hw.init = CLK_HW_INIT_NO_PARENT("escape-alt",
+						     &clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->alt_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 1;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("escape-div", &ctx->parent_ctx.hw,
+					      &clk_dummy_div_parent_ops,
+					      CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("escape-mux", parents,
+						   &clk_step_aside_mux_ops, 0);
+	return clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+}
+
+/*
+ * Test that a clock which cannot divide its way back into its range steps
+ * aside to a parent already running at the rate it needs, without its
+ * consumer being told of any change. 48MHz is what escape-div needs for its
+ * 24MHz, and the mux cannot make 32MHz of it.
+ */
+static void clk_escape_test_steps_aside(struct kunit *test)
+{
+	struct clk_escape_ctx *ctx = test->priv;
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	struct clk_event_counter events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	int ret;
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(mux, &events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div, 24 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), 3 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->alt_ctx.hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, events.pre + events.post + events.abort, 0);
+
+	clk_notifier_unregister(mux, &events.nb);
+}
+
+static struct kunit_case clk_escape_test_cases[] = {
+	KUNIT_CASE(clk_escape_test_steps_aside),
+	{}
+};
+
+/*
+ * Test suite for a clock stepping aside to a parent the change does not move.
+ */
+static struct kunit_suite clk_escape_test_suite = {
+	.name = "clk-escape",
+	.init = clk_escape_test_init,
+	.test_cases = clk_escape_test_cases,
+};
+
+/*
+ * A mux held at 32MHz on one divider of a PLL, able to step aside to another
+ * divider of the same PLL, while a third one drives the PLL:
+ *
+ *		      sibling-pll
+ *		  /	   |	     \
+ *	sibling-div-a sibling-div-b sibling-div-c
+ *			   \	      /
+ *			   sibling-mux
+ */
+struct clk_sibling_ctx {
+	struct clk_dummy_context pll_ctx;
+	struct clk_dummy_div_context div_ctx[3];
+	struct clk_step_aside_mux_ctx mux_ctx;
+};
+
+/* A divider that cannot be asked for a rate: it keeps the divisor it has */
+static const struct clk_ops clk_dummy_div_fixed_ops = {
+	.recalc_rate = clk_dummy_div_recalc_rate,
+};
+
+static void clk_sibling_register(struct kunit *test, unsigned int div_c,
+				 bool div_c_drives, unsigned long mux_flags)
+{
+	const char *parents[2] = { "sibling-div-b", "sibling-div-c" };
+	struct clk_sibling_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	test->priv = ctx;
+
+	ctx->pll_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->pll_ctx.hw.init = CLK_HW_INIT_NO_PARENT("sibling-pll",
+						     &clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->pll_ctx.hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->div_ctx[0].div = 1;
+	ctx->div_ctx[0].hw.init = CLK_HW_INIT_HW("sibling-div-a", &ctx->pll_ctx.hw,
+						 &clk_dummy_div_parent_ops,
+						 CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx[0].hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->div_ctx[1].div = 1;
+	ctx->div_ctx[1].hw.init = CLK_HW_INIT_HW("sibling-div-b", &ctx->pll_ctx.hw,
+						 &clk_dummy_div_fixed_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx[1].hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->div_ctx[2].div = div_c;
+	ctx->div_ctx[2].hw.init = CLK_HW_INIT_HW("sibling-div-c", &ctx->pll_ctx.hw,
+						 div_c_drives ?
+						 &clk_dummy_div_parent_ops :
+						 &clk_dummy_div_ops,
+						 div_c_drives ? CLK_SET_RATE_PARENT : 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx[2].hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ctx->mux_ctx.parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("sibling-mux", parents,
+						   &clk_step_aside_mux_ops,
+						   mux_flags);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+}
+
+/*
+ * Test that a mux does not step aside to a sibling at the rate that sibling
+ * runs at now, when the change drags that sibling along too, and that the
+ * change is refused when nothing else suits. A mux choosing between the rates
+ * its parents run at cannot have div-c moved for it: only a 32MHz PLL keeps it
+ * at 32MHz, and div-a cannot ask for that.
+ */
+static void clk_sibling_test_dragged_sibling_refused(struct kunit *test)
+{
+	struct clk_sibling_ctx *ctx;
+	struct clk *div_a, *mux;
+	int ret;
+
+	clk_sibling_register(test, 1, false, 0);
+	ctx = test->priv;
+	div_a = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div_a, 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->div_ctx[1].hw);
+	KUNIT_EXPECT_EQ(test, clk_hw_get_rate(&ctx->pll_ctx.hw), 2 * STEP_CLOCK_STEP);
+}
+
+/*
+ * Check that a mux asking its parents for the rate it needs has the sibling it
+ * steps aside to moved for it, under the PLL the same change moves, with every
+ * clock involved told of its own change once and the mux never told of any.
+ */
+static void clk_sibling_check_moves_dragged_sibling(struct kunit *test,
+						    bool div_c_drives)
+{
+	struct clk_event_counter mux_events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	struct clk_event_counter div_c_events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	struct clk_sibling_ctx *ctx;
+	struct clk *div_a, *div_c_clk, *mux;
+	int ret;
+
+	/* div-c starts at 16MHz, so that it is told of its own change */
+	clk_sibling_register(test, 2, div_c_drives, CLK_SET_RATE_PARENT);
+	ctx = test->priv;
+	div_a = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	div_c_clk = clk_hw_get_clk_kunit(test, &ctx->div_ctx[2].hw, NULL);
+	mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(mux, &mux_events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(div_c_clk, &div_c_events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* asking first must leave nothing behind for the change itself */
+	KUNIT_EXPECT_EQ(test, clk_round_rate(div_a, 24 * HZ_PER_MHZ), 24 * HZ_PER_MHZ);
+
+	ctx->mux_ctx.set_rate_calls = 0;
+
+	ret = clk_set_rate(div_a, 24 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	/* the mux is switched once, from one place */
+	KUNIT_EXPECT_EQ(test, ctx->mux_ctx.set_rate_calls, 1);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div_a), 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, clk_hw_get_rate(&ctx->pll_ctx.hw), 6 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div_c_clk), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->div_ctx[2].hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+
+	KUNIT_EXPECT_EQ(test, mux_events.pre + mux_events.post + mux_events.abort, 0);
+	KUNIT_EXPECT_EQ(test, div_c_events.pre, 1);
+	KUNIT_EXPECT_EQ(test, div_c_events.post, 1);
+	KUNIT_EXPECT_EQ(test, div_c_events.abort, 0);
+
+	clk_notifier_unregister(div_c_clk, &div_c_events.nb);
+	clk_notifier_unregister(mux, &mux_events.nb);
+}
+
+/* The sibling only divides: its move is part of the PLL's walk */
+static void clk_sibling_test_moves_dragged_sibling(struct kunit *test)
+{
+	clk_sibling_check_moves_dragged_sibling(test, false);
+}
+
+/*
+ * The sibling asks the PLL for a rate of its own: the PLL, settled by the
+ * change, must not be planned again for it.
+ */
+static void clk_sibling_test_moves_driving_sibling(struct kunit *test)
+{
+	clk_sibling_check_moves_dragged_sibling(test, true);
+}
+
+/*
+ * Test that a mux steps aside to a sibling the change drags to the rate it
+ * needs, once that sibling is there, so that its consumer is never told of a
+ * change. div-c divides by 2, and the PLL goes from 32MHz to 64MHz.
+ */
+static void clk_sibling_test_steps_aside_after_parent(struct kunit *test)
+{
+	struct clk_event_counter events = {
+		.nb.notifier_call = clk_event_counter_cb,
+	};
+	struct clk_sibling_ctx *ctx;
+	struct clk *div_a, *mux;
+	int ret;
+
+	clk_sibling_register(test, 2, false, 0);
+	ctx = test->priv;
+	div_a = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+
+	ret = clk_test_hold(mux, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_notifier_register(mux, &events.nb);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div_a, 4 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div_a), 4 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->div_ctx[2].hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, events.pre + events.post + events.abort, 0);
+
+	clk_notifier_unregister(mux, &events.nb);
+}
+
+static struct kunit_case clk_sibling_test_cases[] = {
+	KUNIT_CASE(clk_sibling_test_dragged_sibling_refused),
+	KUNIT_CASE(clk_sibling_test_moves_dragged_sibling),
+	KUNIT_CASE(clk_sibling_test_moves_driving_sibling),
+	KUNIT_CASE(clk_sibling_test_steps_aside_after_parent),
+	{}
+};
+
+/*
+ * Test suite for a clock stepping aside to a parent the same change moves.
+ */
+static struct kunit_suite clk_sibling_test_suite = {
+	.name = "clk-sibling",
+	.test_cases = clk_sibling_test_cases,
+};
+
 /*
  * Test that a clock with a range, orphaned until its parent registers at a
  * rate that takes it out of its range, is warned about: nothing could be done
@@ -5665,6 +6038,7 @@ kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
 	&clk_walking_test_suite,
+	&clk_escape_test_suite,
 	&clk_fork_test_suite,
 	&clk_hw_get_dev_of_node_test_suite,
 	&clk_parse_clkspec_test_suite,
@@ -5688,6 +6062,7 @@ kunit_test_suites(
 	&clk_req_rate_test_suite,
 	&clk_register_clk_parent_data_of_suite,
 	&clk_register_clk_parent_data_device_suite,
+	&clk_sibling_test_suite,
 	&clk_single_parent_mux_test_suite,
 	&clk_switch_test_suite,
 	&clk_uncached_test_suite,

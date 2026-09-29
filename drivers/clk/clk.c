@@ -70,7 +70,10 @@ struct clk_parent_map {
  * @CLK_PIN_WALKING: the rate of the clock is being decided. Nobody else
  *	assumes it, moves the clock, or asks the clocks below it about it.
  * @CLK_PIN_PINNED: the rate and the parent of the clock are decided, and the
- *	clock answers that rate to every question about it.
+ *	clock answers that rate to every question about it. The branches below
+ *	it are still to be planned.
+ * @CLK_PIN_WALKED: pinned, and the branches below it are planned, or being
+ *	planned, for that rate.
  *
  * A clock whose rate is being decided is pinned at each candidate while the
  * clocks below it are asked about it, by a plan of its own that puts it back
@@ -80,6 +83,7 @@ enum clk_pin {
 	CLK_PIN_FREE = 0,
 	CLK_PIN_WALKING,
 	CLK_PIN_PINNED,
+	CLK_PIN_WALKED,
 };
 
 /**
@@ -107,6 +111,9 @@ enum clk_pin {
  * @pin_prev:          State @pin goes back to once the clock is unpinned.
  * @pin_rate:          Rate the clock is pinned at.
  * @pin_node:          Node in the list of clocks the change has pinned.
+ * @top_node:          Node in the list of clocks a rate change also applies
+ *                     from, besides its topmost clock: clocks moving to
+ *                     another parent to stay in range.
  * @new_parent:        Pointer to new parent during parent change. This is also
  *                     used when a clk's rate is changed.
  * @new_child:         Pointer to new child during reparenting. This is also
@@ -171,6 +178,7 @@ struct clk_core {
 	enum clk_pin		pin_prev;
 	unsigned long		pin_rate;
 	struct hlist_node	pin_node;
+	struct hlist_node	top_node;
 	unsigned long		accuracy;
 	int			phase;
 	struct clk_duty		duty;
@@ -668,7 +676,7 @@ static void clk_core_stop_walking(struct clk_core *core, enum clk_pin pin)
 
 static bool clk_core_is_pinned(struct clk_core *core)
 {
-	return core->pin == CLK_PIN_PINNED;
+	return core->pin == CLK_PIN_PINNED || core->pin == CLK_PIN_WALKED;
 }
 
 static bool clk_core_pinned_rate(struct clk_core *core, unsigned long *rate)
@@ -2517,13 +2525,22 @@ out:
 
 /*
  * What a rate change being worked out carries around: the clocks it has
- * pinned, which answer with the rate it pinned them at.
+ * pinned, which answer with the rate it pinned them at, the clocks it is
+ * applied from (its topmost clock, and the early and late ones). A plan
+ * without a topmost clock only asks about a rate that may yet be passed over.
  */
 struct clk_plan {
 	struct hlist_head pins;
+	struct clk_core *top;
+	struct hlist_head early;
+	struct hlist_head late;
 };
 
-#define CLK_PLAN_INIT { .pins = HLIST_HEAD_INIT }
+#define CLK_PLAN_INIT {				\
+	.pins = HLIST_HEAD_INIT,		\
+	.early = HLIST_HEAD_INIT,		\
+	.late = HLIST_HEAD_INIT,		\
+}
 
 static void clk_plan_pin(struct clk_plan *plan, struct clk_core *core,
 			 unsigned long rate)
@@ -3006,6 +3023,88 @@ static bool clk_core_planned_rate(struct clk_core *core, unsigned long *rate)
 	return true;
 }
 
+static bool clk_plan_has_top(struct hlist_head *tops, struct clk_core *core)
+{
+	struct clk_core *top;
+
+	hlist_for_each_entry(top, tops, top_node)
+		if (top == core)
+			return true;
+
+	return false;
+}
+
+/*
+ * The clock whose walk reaches @core when the plan is applied: the topmost
+ * clock of the plan, one of the clocks it is also applied from, or a clock of
+ * a change already being applied. NULL when no walk does, and @core keeps its
+ * rate. A clock the plan pinned follows the parent the plan gives it.
+ */
+static struct clk_core *clk_plan_covering_top(struct clk_plan *plan,
+					      struct clk_core *core)
+{
+	while (core) {
+		if (core == plan->top || !hlist_unhashed(&core->top_node))
+			return core;
+
+		if (clk_core_is_pinned(core) && core->new_parent)
+			core = core->new_parent;
+		else
+			core = core->parent;
+	}
+
+	return NULL;
+}
+
+static bool clk_plan_walks(struct clk_plan *plan, struct clk_core *core)
+{
+	return core == plan->top || clk_plan_has_top(&plan->early, core) ||
+	       clk_plan_has_top(&plan->late, core);
+}
+
+/*
+ * Give @core, planned by a search whose topmost clock is @top, a walk of its own
+ * when it switches parent. It is switched once its new parent runs at the rate
+ * it was promised: after the walk of the plan's topmost clock if that walk moves
+ * it, before it otherwise, so that it is gone before the parent it leaves moves.
+ * A @top the walks of the plan do not reach is refused.
+ */
+static int clk_plan_track(struct clk_plan *plan, struct clk_core *core,
+			  struct clk_core *top)
+{
+	struct clk_core *cover;
+
+	if (!plan->top)
+		return 0;
+
+	if (core->new_parent && core->new_parent != core->parent) {
+		/* already switching parent in a change being applied */
+		if (!hlist_unhashed(&core->top_node))
+			return -EBUSY;
+
+		cover = clk_plan_covering_top(plan, core->new_parent);
+		if (cover == plan->top)
+			hlist_add_head(&core->top_node, &plan->late);
+		else if (!cover)
+			hlist_add_head(&core->top_node, &plan->early);
+		else
+			return -EBUSY;
+
+		/* applied from its own list, not from the walk of its new parent */
+		if (core->new_parent->new_child == core)
+			core->new_parent->new_child = NULL;
+
+		return 0;
+	}
+
+	if (core != top)
+		return 0;
+
+	cover = clk_plan_covering_top(plan, core->parent);
+
+	return cover && clk_plan_walks(plan, cover) ? 0 : -EBUSY;
+}
+
 static int clk_plan_walk(struct clk_plan *plan, struct clk_core *node,
 			 struct clk_core *skip);
 
@@ -3033,20 +3132,60 @@ static void clk_plan_pin_path(struct clk_plan *plan, struct clk_core *core,
 	}
 }
 
-/* Plan the branches hanging off the clocks from @core up to @top */
-static int clk_plan_walk_path(struct clk_plan *plan, struct clk_core *core,
-			      struct clk_core *top)
+/*
+ * Give the clocks from @top down to @core a walk of their own if they need one.
+ * A clock is tracked after the ones above it, whose walks may reach it.
+ */
+static int clk_plan_track_path(struct clk_plan *plan, struct clk_core *core,
+			       struct clk_core *top)
 {
-	struct clk_core *from = NULL;
+	struct clk_core *up = core->new_parent ?: core->parent;
 	int ret;
 
-	while (core) {
-		ret = clk_plan_walk(plan, core, from);
-		if (ret || core == top)
+	if (core != top && up) {
+		ret = clk_plan_track_path(plan, up, top);
+		if (ret)
 			return ret;
+	}
 
-		from = core;
-		core = core->new_parent ?: core->parent;
+	return clk_plan_track(plan, core, top);
+}
+
+/* Whether @core is above @below, on the branch @below hangs from */
+static bool clk_core_is_above(struct clk_core *core, struct clk_core *below)
+{
+	while ((below = below->parent))
+		if (below == core)
+			return true;
+
+	return false;
+}
+
+/*
+ * Plan the branches hanging off the clocks from @core up to @top.
+ *
+ * With @nested, @core was reached by the walks still running on the clocks
+ * above it, on its own branch. Those clocks are left to their walks, which
+ * plan their branches again when their rate moves.
+ */
+static int clk_plan_walk_path(struct clk_plan *plan, struct clk_core *core,
+			      struct clk_core *top, bool nested)
+{
+	struct clk_core *from = NULL, *node = core;
+	int ret;
+
+	while (node) {
+		if (!nested || !clk_core_is_above(node, core)) {
+			ret = clk_plan_walk(plan, node, from);
+			if (ret)
+				return ret;
+		}
+
+		if (node == top)
+			return 0;
+
+		from = node;
+		node = node->new_parent ?: node->parent;
 	}
 
 	return 0;
@@ -3058,14 +3197,12 @@ static int clk_plan_walk_path(struct clk_plan *plan, struct clk_core *core,
  * one it runs at, with what the change has pinned held where it is. The
  * clocks between @core and those are free to move for it. The change is
  * refused if the answer is outside the range of @core.
- *
- * The clocks above @core are the walks it was reached from, which plan their
- * branches again when @core moves them.
  */
 static int clk_plan_update(struct clk_plan *plan, struct clk_core *core)
 {
 	unsigned long min_rate, max_rate;
-	struct clk_core *top, *node;
+	struct clk_core *top;
+	int ret;
 
 	/* a clock that cannot ask for a rate follows its parent */
 	if (!clk_core_can_round(core) && !(core->flags & CLK_SET_RATE_PARENT)) {
@@ -3087,18 +3224,13 @@ static int clk_plan_update(struct clk_plan *plan, struct clk_core *core)
 		return -EBUSY;
 	}
 
-	/* a clock does not switch parent to stay in its range */
-	for (node = core; ; node = node->parent) {
-		if (node->new_parent && node->new_parent != node->parent)
-			return -EBUSY;
-
-		if (node == top)
-			break;
-	}
-
 	clk_plan_pin_path(plan, core, top);
 
-	return clk_plan_walk(plan, core, NULL);
+	ret = clk_plan_track_path(plan, core, top);
+	if (ret)
+		return ret;
+
+	return clk_plan_walk_path(plan, core, top, true);
 }
 
 /*
@@ -3120,10 +3252,16 @@ static int clk_plan_walk(struct clk_plan *plan, struct clk_core *node,
 	unsigned long rate;
 	int ret;
 
+	if (node->pin == CLK_PIN_WALKED)
+		return 0;
+
 again:
 	rate = clk_core_get_rate_nolock(node);
 	if (rate == node->rate)
 		return 0;
+
+	if (node->pin == CLK_PIN_PINNED)
+		node->pin = CLK_PIN_WALKED;
 
 	hlist_for_each_entry(child, &node->children, child_node) {
 		/* answering for itself */
@@ -3167,31 +3305,100 @@ static bool clk_core_children_accept(struct clk_core *core, unsigned long rate)
 	return !ret;
 }
 
+/* Notify @event from every clock a plan is applied from */
+static struct clk_core *clk_plan_propagate(struct clk_plan *plan,
+					   struct clk_core *top,
+					   unsigned long event)
+{
+	struct clk_core *core, *tmp, *fail_clk;
+
+	fail_clk = clk_propagate_rate_change(top, event);
+
+	hlist_for_each_entry(core, &plan->early, top_node) {
+		tmp = clk_propagate_rate_change(core, event);
+		if (tmp)
+			fail_clk = tmp;
+	}
+
+	hlist_for_each_entry(core, &plan->late, top_node) {
+		tmp = clk_propagate_rate_change(core, event);
+		if (tmp)
+			fail_clk = tmp;
+	}
+
+	return fail_clk;
+}
+
+/* Forget the clocks a plan was to be applied from besides its topmost one */
+static void clk_plan_drop_tops(struct clk_plan *plan)
+{
+	struct clk_core *core;
+	struct hlist_node *tmp;
+
+	hlist_for_each_entry_safe(core, tmp, &plan->early, top_node)
+		hlist_del_init(&core->top_node);
+
+	hlist_for_each_entry_safe(core, tmp, &plan->late, top_node)
+		hlist_del_init(&core->top_node);
+}
+
+/*
+ * Apply the clocks of @tops in order, unless @ret already says the change
+ * failed: from then on, they are told it is aborted instead. Returns the first
+ * error.
+ */
+static int clk_plan_apply_tops(struct hlist_head *tops, int ret)
+{
+	struct clk_core *core;
+	struct hlist_node *tmp;
+
+	hlist_for_each_entry_safe(core, tmp, tops, top_node) {
+		hlist_del_init(&core->top_node);
+
+		if (ret)
+			clk_propagate_rate_change(core, ABORT_RATE_CHANGE);
+		else
+			ret = clk_change_rate(core, false);
+	}
+
+	return ret;
+}
+
 /*
  * Apply a plan from @top: tell the clocks it changes what is about to happen,
  * let them refuse, then program them. Every clock below @top carries its
  * planned rate in new_rate. With @switch_only, @top is only switched to its new
- * parent.
+ * parent. The clocks switching parent are switched before @top or after it, as
+ * the plan decided.
  *
- * Refusing is only possible before anything is programmed. A parent switch the
- * hardware refuses afterwards is reported, and only the clocks below it are
- * left out: when it is @top's own, nothing has changed.
+ * Refusing is only possible before anything is programmed. A clock failing
+ * to be programmed stops the change there: it is reported, what was applied
+ * before it stays, and the clocks not applied are told the change is aborted.
  */
-static int clk_core_commit_rates(struct clk_core *top, bool switch_only)
+static int clk_core_commit_rates(struct clk_plan *plan, struct clk_core *top,
+				 bool switch_only)
 {
 	struct clk_core *fail_clk;
+	int ret;
 
 	lockdep_assert_held(&prepare_lock);
 
-	fail_clk = clk_propagate_rate_change(top, PRE_RATE_CHANGE);
+	fail_clk = clk_plan_propagate(plan, top, PRE_RATE_CHANGE);
 	if (fail_clk) {
 		pr_debug("%s: %s refused the rate change\n", __func__,
 			 fail_clk->name);
-		clk_propagate_rate_change(top, ABORT_RATE_CHANGE);
+		clk_plan_propagate(plan, top, ABORT_RATE_CHANGE);
+		clk_plan_drop_tops(plan);
 		return -EBUSY;
 	}
 
-	return clk_change_rate(top, switch_only);
+	ret = clk_plan_apply_tops(&plan->early, 0);
+	if (ret)
+		clk_propagate_rate_change(top, ABORT_RATE_CHANGE);
+	else
+		ret = clk_change_rate(top, switch_only);
+
+	return clk_plan_apply_tops(&plan->late, ret);
 }
 
 static int clk_core_set_rate_nolock(struct clk_core *core,
@@ -3222,17 +3429,18 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	if (!top)
 		return clk_range_vetoed ? -EBUSY : -EINVAL;
 
+	plan.top = top;
 	clk_plan_pin_path(&plan, core, top);
-	ret = clk_plan_walk_path(&plan, core, top);
+	ret = clk_plan_walk_path(&plan, core, top, false);
 	clk_plan_release(&plan);
-	if (ret)
+	if (!ret)
+		ret = clk_pm_runtime_get(core);
+	if (ret) {
+		clk_plan_drop_tops(&plan);
 		return ret;
+	}
 
-	ret = clk_pm_runtime_get(core);
-	if (ret)
-		return ret;
-
-	ret = clk_core_commit_rates(top, false);
+	ret = clk_core_commit_rates(&plan, top, false);
 
 	clk_pm_runtime_put(core);
 
@@ -3642,13 +3850,16 @@ static int clk_core_set_parent_nolock(struct clk_core *core,
 		/* the commit starts at @core, the new parent need not lead to it */
 		parent->new_child = NULL;
 
+		plan.top = core;
 		clk_plan_pin_path(&plan, core, core);
-		ret = clk_plan_walk_path(&plan, core, core);
+		ret = clk_plan_walk_path(&plan, core, core, false);
 		clk_plan_release(&plan);
-		if (ret)
+		if (ret) {
+			clk_plan_drop_tops(&plan);
 			goto runtime_put;
+		}
 
-		ret = clk_core_commit_rates(core, true);
+		ret = clk_core_commit_rates(&plan, core, true);
 	} else {
 		/* propagate PRE_RATE_CHANGE notifications */
 		ret = __clk_speculate_rates(core, p_rate);
