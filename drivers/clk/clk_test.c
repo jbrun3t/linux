@@ -5208,9 +5208,37 @@ static void clk_step_test_held_clock_refuses_search(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), 2 * STEP_CLOCK_STEP);
 }
 
+/*
+ * Test that a held clock steers what another clock can ask its parent for.
+ * 48MHz would give div0 exactly the 24MHz it wants, but div1 cannot divide
+ * 48MHz into the 32MHz it has to stay at, so the parent ends up at 96MHz,
+ * which serves both.
+ */
+static void clk_step_test_held_clock_steers_search(struct kunit *test)
+{
+	struct clk_step_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_test_hold(div1, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_round_rate(div0, 24 * HZ_PER_MHZ), 24 * HZ_PER_MHZ);
+
+	ret = clk_set_rate(div0, 24 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), 24 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), 6 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), 2 * STEP_CLOCK_STEP);
+}
+
 static struct kunit_case clk_step_test_cases[] = {
 	KUNIT_CASE(clk_step_test_set_rate_moves_parent),
 	KUNIT_CASE(clk_step_test_held_clock_keeps_its_rate),
+	KUNIT_CASE(clk_step_test_held_clock_steers_search),
 	KUNIT_CASE(clk_step_test_held_clock_refuses_search),
 	{}
 };
@@ -5389,9 +5417,117 @@ static struct kunit_suite clk_range_reparent_test_suite = {
 	.test_cases = clk_range_reparent_test_cases,
 };
 
+/*
+ * A mux that can only reach some rates through a divider which has to divide
+ * a moving parent differently, with a clock below that divider that follows
+ * it and has a range:
+ *
+ *	fixed		   pll
+ *	  |		    |
+ *	  |		  div-b (divides by 2, CLK_SET_RATE_PARENT)
+ *	  |		 /	\
+ *	  `-- mux ------'	 follower (range, no setting of its own)
+ */
+struct clk_walking_ctx {
+	struct clk_dummy_context fixed_ctx;
+	struct clk_dummy_context pll_ctx;
+	struct clk_dummy_div_context div_b_ctx;
+	struct clk_hw follower;
+	struct clk_multiple_parent_ctx mux_ctx;
+};
+
+static int clk_walking_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "walking-fixed", "walking-div-b" };
+	struct clk_walking_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->fixed_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->fixed_ctx.hw.init = CLK_HW_INIT_NO_PARENT("walking-fixed",
+						       &clk_dummy_fixed_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->fixed_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->pll_ctx.rate = 4 * STEP_CLOCK_STEP;
+	ctx->pll_ctx.hw.init = CLK_HW_INIT_NO_PARENT("walking-pll",
+						     &clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->pll_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_b_ctx.div = 2;
+	ctx->div_b_ctx.hw.init = CLK_HW_INIT_HW("walking-div-b", &ctx->pll_ctx.hw,
+						&clk_dummy_div_parent_ops,
+						CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_b_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->follower.init = CLK_HW_INIT_HW("walking-follower", &ctx->div_b_ctx.hw,
+					    &empty_clk_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->follower);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.current_parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("walking-mux", parents,
+						   &clk_moving_parent_mux_ops,
+						   CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+}
+
+/*
+ * Test that a clock working out its rate is not judged by the rate its parent
+ * is being asked for. 38MHz needs div-b to divide 112MHz by 3: judged with the
+ * divider by 2 it has now, div-b would take the follower to 56MHz, outside its
+ * range, and every rate but the current one would be turned down.
+ */
+static void clk_walking_test_not_judged_while_walking(struct kunit *test)
+{
+	struct clk_walking_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *follower = clk_hw_get_clk_kunit(test, &ctx->follower, NULL);
+	int ret;
+
+	ret = clk_set_rate_range(follower, 2 * STEP_CLOCK_STEP, 40 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_round_rate(mux, 38 * HZ_PER_MHZ), 38 * HZ_PER_MHZ);
+
+	ret = clk_set_rate(mux, 38 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->div_b_ctx.hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 38 * HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(follower), 38 * HZ_PER_MHZ);
+}
+
+static struct kunit_case clk_walking_test_cases[] = {
+	KUNIT_CASE(clk_walking_test_not_judged_while_walking),
+	{}
+};
+
+/*
+ * Test suite for a rate change reaching a clock with a range through a parent
+ * that works out its own rate.
+ */
+static struct kunit_suite clk_walking_test_suite = {
+	.name = "clk-walking",
+	.init = clk_walking_test_init,
+	.test_cases = clk_walking_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
+	&clk_walking_test_suite,
 	&clk_fork_test_suite,
 	&clk_hw_get_dev_of_node_test_suite,
 	&clk_parse_clkspec_test_suite,

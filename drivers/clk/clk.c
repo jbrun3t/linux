@@ -67,11 +67,18 @@ struct clk_parent_map {
 /**
  * enum clk_pin - what the rate change being worked out knows of a clock
  * @CLK_PIN_FREE: nothing is decided. The clock follows its parent.
+ * @CLK_PIN_WALKING: the rate of the clock is being decided. Nobody else
+ *	assumes it, moves the clock, or asks the clocks below it about it.
  * @CLK_PIN_PINNED: the rate and the parent of the clock are decided, and the
  *	clock answers that rate to every question about it.
+ *
+ * A clock whose rate is being decided is pinned at each candidate while the
+ * clocks below it are asked about it, by a plan of its own that puts it back
+ * once they have answered.
  */
 enum clk_pin {
 	CLK_PIN_FREE = 0,
+	CLK_PIN_WALKING,
 	CLK_PIN_PINNED,
 };
 
@@ -97,6 +104,7 @@ enum clk_pin {
  * @new_rate:          New rate to be set during a rate change operation.
  * @pin:               What the rate change being worked out knows of this
  *                     clock.
+ * @pin_prev:          State @pin goes back to once the clock is unpinned.
  * @pin_rate:          Rate the clock is pinned at.
  * @pin_node:          Node in the list of clocks the change has pinned.
  * @new_parent:        Pointer to new parent during parent change. This is also
@@ -160,6 +168,7 @@ struct clk_core {
 	unsigned long		min_rate;
 	unsigned long		max_rate;
 	enum clk_pin		pin;
+	enum clk_pin		pin_prev;
 	unsigned long		pin_rate;
 	struct hlist_node	pin_node;
 	unsigned long		accuracy;
@@ -636,6 +645,27 @@ unsigned int __clk_get_enable_count(struct clk *clk)
 	return !clk ? 0 : clk->core->enable_count;
 }
 
+/*
+ * Mark @core as having its rate decided, and return the state to give back to
+ * clk_core_stop_walking(). A clock already being decided stays so until the
+ * outermost decision is made.
+ */
+static enum clk_pin clk_core_start_walking(struct clk_core *core)
+{
+	enum clk_pin pin = core->pin;
+
+	if (pin == CLK_PIN_FREE)
+		core->pin = CLK_PIN_WALKING;
+
+	return pin;
+}
+
+static void clk_core_stop_walking(struct clk_core *core, enum clk_pin pin)
+{
+	if (pin == CLK_PIN_FREE)
+		core->pin = CLK_PIN_FREE;
+}
+
 static bool clk_core_is_pinned(struct clk_core *core)
 {
 	return core->pin == CLK_PIN_PINNED;
@@ -742,8 +772,12 @@ static void clk_core_init_rate_req(struct clk_core * const core,
 
 static int clk_core_round_rate_nolock(struct clk_core *core,
 				      struct clk_rate_request *req);
+static bool clk_core_children_accept(struct clk_core *core, unsigned long rate);
 static unsigned long clk_recalc(struct clk_core *core,
 				unsigned long parent_rate);
+
+/* Whether a range turned down a rate while the change was being worked out */
+static bool clk_range_vetoed;
 
 static bool clk_core_has_parent(struct clk_core *core, const struct clk_core *parent)
 {
@@ -1767,7 +1801,24 @@ static int clk_core_determine_round_nolock(struct clk_core *core,
 	} else if (clk_core_rate_is_protected(core)) {
 		req->rate = core->rate;
 	} else if (core->ops->determine_rate) {
-		return core->ops->determine_rate(core->hw, req);
+		enum clk_pin pin = clk_core_start_walking(core);
+		int ret;
+
+		ret = core->ops->determine_rate(core->hw, req);
+		clk_core_stop_walking(core, pin);
+		if (ret)
+			return ret;
+
+		/*
+		 * A rate against which a clock below with a consumer range
+		 * cannot work out a rate within it is not a rate this clock
+		 * can be asked for. A caller looking for a rate carries
+		 * on looking.
+		 */
+		if (!clk_core_children_accept(core, req->rate)) {
+			clk_range_vetoed = true;
+			return -EBUSY;
+		}
 	} else {
 		return -EINVAL;
 	}
@@ -1875,12 +1926,15 @@ static int clk_core_round_rate_nolock(struct clk_core *core,
 
 	if (core->flags & CLK_SET_RATE_PARENT) {
 		struct clk_rate_request parent_req;
+		enum clk_pin pin;
 
 		clk_core_forward_rate_req(core, req, core->parent, &parent_req, req->rate);
 
 		trace_clk_rate_request_start(&parent_req);
 
+		pin = clk_core_start_walking(core);
 		ret = clk_core_round_rate_nolock(core->parent, &parent_req);
+		clk_core_stop_walking(core, pin);
 		if (ret)
 			return ret;
 
@@ -2452,6 +2506,7 @@ static void clk_plan_pin(struct clk_plan *plan, struct clk_core *core,
 	if (clk_core_is_pinned(core))
 		return;
 
+	core->pin_prev = core->pin;
 	core->pin = CLK_PIN_PINNED;
 	core->pin_rate = rate;
 	hlist_add_head(&core->pin_node, &plan->pins);
@@ -2464,7 +2519,7 @@ static void clk_plan_release(struct clk_plan *plan)
 	struct hlist_node *tmp;
 
 	hlist_for_each_entry_safe(core, tmp, &plan->pins, pin_node) {
-		core->pin = CLK_PIN_FREE;
+		core->pin = core->pin_prev;
 		hlist_del(&core->pin_node);
 		clk_pinned_count--;
 	}
@@ -2548,7 +2603,13 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 					   unsigned long rate,
 					   struct clk_core *from,
 					   unsigned long min_rate,
-					   unsigned long max_rate)
+					   unsigned long max_rate);
+
+static struct clk_core *__clk_calc_new_rates(struct clk_core *core,
+					     unsigned long rate,
+					     struct clk_core *from,
+					     unsigned long min_rate,
+					     unsigned long max_rate)
 {
 	struct clk_core *top = core;
 	struct clk_core *old_parent, *parent;
@@ -2602,6 +2663,9 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 		if (clk_core_pinned_rate(parent, &new_rate))
 			goto out;
 
+		if (parent->pin == CLK_PIN_WALKING)
+			return NULL;
+
 		top = clk_calc_new_rates(parent, rate, core, min_rate, max_rate);
 		new_rate = parent->new_rate;
 		goto out;
@@ -2627,8 +2691,11 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 
 	if ((core->flags & CLK_SET_RATE_PARENT) && parent &&
 	    best_parent_rate != clk_core_get_rate_nolock(parent)) {
-		/* a parent the change being worked out has pinned cannot move */
-		if (clk_core_is_pinned(parent))
+		/*
+		 * A parent the change being worked out has pinned, or one
+		 * whose rate is being decided, cannot be moved from here.
+		 */
+		if (parent->pin != CLK_PIN_FREE)
 			return NULL;
 
 		top = clk_calc_new_rates(parent, best_parent_rate, core,
@@ -2664,6 +2731,29 @@ static struct clk_core *clk_calc_new_rates(struct clk_core *core,
 
 out:
 	clk_calc_subtree(core, new_rate, parent, p_index, from);
+
+	return top;
+}
+
+/*
+ * The rate of @core is being decided for as long as the propagation above it
+ * goes on: it is not judged by the rates its parents are being asked for.
+ */
+static struct clk_core *clk_calc_new_rates(struct clk_core *core,
+					   unsigned long rate,
+					   struct clk_core *from,
+					   unsigned long min_rate,
+					   unsigned long max_rate)
+{
+	struct clk_core *top;
+	enum clk_pin pin;
+
+	if (IS_ERR_OR_NULL(core))
+		return NULL;
+
+	pin = clk_core_start_walking(core);
+	top = __clk_calc_new_rates(core, rate, from, min_rate, max_rate);
+	clk_core_stop_walking(core, pin);
 
 	return top;
 }
@@ -2860,8 +2950,9 @@ static unsigned long clk_core_req_round_rate_nolock(struct clk_core *core,
 /*
  * The rate @core runs at once the change being worked out is applied: the rate
  * it is pinned at, or the one it follows from its nearest pinned ancestor.
- * It is not known while a clock on the way has a consumer range and is not
- * pinned yet, since it may still change its setting.
+ * It is not known while a clock on the way is still working out its rate, or
+ * has a consumer range and is not pinned yet, since it may still change its
+ * setting.
  */
 static bool clk_core_planned_rate(struct clk_core *core, unsigned long *rate)
 {
@@ -2870,7 +2961,7 @@ static bool clk_core_planned_rate(struct clk_core *core, unsigned long *rate)
 	if (clk_core_pinned_rate(core, rate))
 		return true;
 
-	if (clk_core_has_consumer_range(core))
+	if (core->pin == CLK_PIN_WALKING || clk_core_has_consumer_range(core))
 		return false;
 
 	if (!core->parent) {
@@ -3006,7 +3097,9 @@ again:
 		return 0;
 
 	hlist_for_each_entry(child, &node->children, child_node) {
-		if (child == skip || child == moved_by || !child->range_count)
+		/* answering for itself */
+		if (child == skip || child == moved_by || !child->range_count ||
+		    child->pin == CLK_PIN_WALKING)
 			continue;
 
 		if (!clk_core_is_pinned(child) &&
@@ -3024,6 +3117,25 @@ again:
 	}
 
 	return 0;
+}
+
+/*
+ * Whether the clocks below @core can live with it running at @rate: each one
+ * with a consumer range works out a rate within it.
+ */
+static bool clk_core_children_accept(struct clk_core *core, unsigned long rate)
+{
+	struct clk_plan plan = CLK_PLAN_INIT;
+	int ret;
+
+	if (!core->range_count)
+		return true;
+
+	clk_plan_pin(&plan, core, rate);
+	ret = clk_plan_walk(&plan, core, NULL);
+	clk_plan_release(&plan);
+
+	return !ret;
 }
 
 /*
@@ -3064,6 +3176,8 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	if (!core)
 		return 0;
 
+	clk_range_vetoed = false;
+
 	rate = clk_core_req_round_rate_nolock(core, req_rate);
 
 	/* bail early if nothing to do */
@@ -3077,7 +3191,7 @@ static int clk_core_set_rate_nolock(struct clk_core *core,
 	/* calculate new rates and get the topmost changed clock */
 	top = clk_calc_new_rates(core, req_rate, NULL, 0, ULONG_MAX);
 	if (!top)
-		return -EINVAL;
+		return clk_range_vetoed ? -EBUSY : -EINVAL;
 
 	clk_plan_pin_path(&plan, core, top);
 	ret = clk_plan_walk_path(&plan, core, top);
