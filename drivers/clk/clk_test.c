@@ -5524,6 +5524,143 @@ static struct kunit_suite clk_walking_test_suite = {
 	.test_cases = clk_walking_test_cases,
 };
 
+/*
+ * Test that a clock with a range, orphaned until its parent registers at a
+ * rate that takes it out of its range, is warned about: nothing could be done
+ * for it.
+ */
+static void clk_range_warn_test_orphan_adopted(struct kunit *test)
+{
+	struct clk_dummy_div_context *div;
+	struct clk_dummy_context *parent;
+	struct clk *clk;
+	int ret;
+
+	div = kunit_kzalloc(test, sizeof(*div), GFP_KERNEL);
+	parent = kunit_kzalloc(test, sizeof(*parent), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, div);
+	KUNIT_ASSERT_NOT_NULL(test, parent);
+
+	div->div = 1;
+	div->hw.init = CLK_HW_INIT("warn-orphan", "warn-late-parent",
+				   &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &div->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	clk = clk_hw_get_clk_kunit(test, &div->hw, NULL);
+	ret = clk_set_rate_range(clk, FORK_DIV_MIN_RATE, FORK_DIV_MAX_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	parent->rate = FORK_PARENT_RATE_2;
+	parent->hw.init = CLK_HW_INIT_NO_PARENT("warn-late-parent",
+						&clk_dummy_rate_ops, 0);
+
+	kunit_warning_suppress(test) {
+		ret = clk_hw_register_kunit(test, NULL, &parent->hw);
+		KUNIT_ASSERT_EQ(test, ret, 0);
+		KUNIT_EXPECT_SUPPRESSED_WARNING_COUNT(test, 1);
+	}
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(clk), FORK_PARENT_RATE_2);
+}
+
+/*
+ * Test that a clock with a range is warned about when a clock above it works
+ * its subtree out again while the change is applied, which takes that subtree
+ * back to following it.
+ */
+static void clk_range_warn_test_recalc_new_rates(struct kunit *test)
+{
+	struct clk_dummy_div_context *div;
+	struct clk_dummy_context *parent;
+	struct clk *clk, *parent_clk;
+	int ret;
+
+	div = kunit_kzalloc(test, sizeof(*div), GFP_KERNEL);
+	parent = kunit_kzalloc(test, sizeof(*parent), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, div);
+	KUNIT_ASSERT_NOT_NULL(test, parent);
+
+	parent->rate = FORK_PARENT_RATE_1;
+	parent->hw.init = CLK_HW_INIT_NO_PARENT("warn-recalc-parent",
+						&clk_dummy_rate_ops,
+						CLK_RECALC_NEW_RATES);
+	ret = clk_hw_register_kunit(test, NULL, &parent->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	div->div = 1;
+	div->hw.init = CLK_HW_INIT_HW("warn-recalc-div", &parent->hw,
+				      &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &div->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	clk = clk_hw_get_clk_kunit(test, &div->hw, NULL);
+	parent_clk = clk_hw_get_clk_kunit(test, &parent->hw, NULL);
+	ret = clk_set_rate_range(clk, FORK_DIV_MIN_RATE, FORK_DIV_MAX_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	kunit_warning_suppress(test) {
+		ret = clk_set_rate(parent_clk, FORK_PARENT_RATE_2);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_SUPPRESSED_WARNING_COUNT(test, 1);
+	}
+}
+
+/* Test that a change keeping every clock in range is not warned about. */
+static void clk_range_warn_test_quiet_when_honoured(struct kunit *test)
+{
+	struct clk_dummy_div_context *div;
+	struct clk_dummy_context *parent;
+	struct clk *clk, *parent_clk;
+	int ret;
+
+	div = kunit_kzalloc(test, sizeof(*div), GFP_KERNEL);
+	parent = kunit_kzalloc(test, sizeof(*parent), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, div);
+	KUNIT_ASSERT_NOT_NULL(test, parent);
+
+	parent->rate = FORK_PARENT_RATE_1;
+	parent->hw.init = CLK_HW_INIT_NO_PARENT("warn-quiet-parent",
+						&clk_dummy_rate_ops,
+						CLK_RECALC_NEW_RATES);
+	ret = clk_hw_register_kunit(test, NULL, &parent->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	div->div = 1;
+	div->hw.init = CLK_HW_INIT_HW("warn-quiet-div", &parent->hw,
+				      &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &div->hw);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	clk = clk_hw_get_clk_kunit(test, &div->hw, NULL);
+	parent_clk = clk_hw_get_clk_kunit(test, &parent->hw, NULL);
+	ret = clk_set_rate_range(clk, 60 * HZ_PER_MHZ, 120 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	kunit_warning_suppress(test) {
+		ret = clk_set_rate(parent_clk, 110 * HZ_PER_MHZ);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_SUPPRESSED_WARNING_COUNT(test, 0);
+	}
+}
+
+static struct kunit_case clk_range_warn_test_cases[] = {
+	KUNIT_CASE(clk_range_warn_test_orphan_adopted),
+	KUNIT_CASE(clk_range_warn_test_recalc_new_rates),
+	KUNIT_CASE(clk_range_warn_test_quiet_when_honoured),
+	{}
+};
+
+/*
+ * Test suite for the changes the framework has no say in.
+ *
+ * These tests exercise that a clock left outside its range is warned about.
+ */
+static struct kunit_suite clk_range_warn_test_suite = {
+	.name = "clk-range-warn",
+	.test_cases = clk_range_warn_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
@@ -5541,6 +5678,7 @@ kunit_test_suites(
 	&clk_orphan_transparent_single_parent_test_suite,
 	&clk_pass_through_test_suite,
 	&clk_range_reparent_test_suite,
+	&clk_range_warn_test_suite,
 	&clk_protect_reparent_test_suite,
 	&clk_step_test_suite,
 	&clk_orphan_two_level_root_last_test_suite,

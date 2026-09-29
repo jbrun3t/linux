@@ -2299,6 +2299,31 @@ static void clk_core_update_orphan_status(struct clk_core *core, bool is_orphan)
 		clk_core_update_orphan_status(child, is_orphan);
 }
 
+/*
+ * Complain about the clocks at or below @core with a consumer range and left
+ * outside it by a change the framework had no say in: done in the
+ * hardware before the framework heard about it, or worked out again while
+ * being applied. There is nothing left to refuse or to work around.
+ */
+static void clk_core_warn_ranges(struct clk_core *core)
+{
+	unsigned long min_rate, max_rate;
+	struct clk_core *child;
+
+	if (!core->range_count)
+		return;
+
+	if (clk_core_has_consumer_range(core)) {
+		clk_core_get_boundaries(core, &min_rate, &max_rate);
+		WARN(core->rate < min_rate || core->rate > max_rate,
+		     "clk %s: left at %lu, outside [%lu, %lu], by a change it had no say in\n",
+		     core->name, core->rate, min_rate, max_rate);
+	}
+
+	hlist_for_each_entry(child, &core->children, child_node)
+		clk_core_warn_ranges(child);
+}
+
 static void clk_reparent(struct clk_core *core, struct clk_core *new_parent)
 {
 	bool was_orphan = core->orphan;
@@ -2898,6 +2923,10 @@ static int clk_change_rate(struct clk_core *core, bool switch_only)
 		if (err && !ret)
 			ret = err;
 	}
+
+	/* the subtree was planned again above, without its ranges */
+	if (core->flags & CLK_RECALC_NEW_RATES)
+		clk_core_warn_ranges(core);
 
 	clk_pm_runtime_put(core);
 
@@ -3532,6 +3561,7 @@ static void clk_core_reparent(struct clk_core *core,
 	clk_reparent(core, new_parent);
 	__clk_recalc_accuracies(core);
 	__clk_recalc_rates(core, POST_RATE_CHANGE);
+	clk_core_warn_ranges(core);
 }
 
 void clk_hw_reparent(struct clk_hw *hw, struct clk_hw *new_parent)
@@ -4595,6 +4625,7 @@ static void clk_core_reparent_orphans_nolock(void)
 			__clk_set_parent_after(orphan, parent, NULL);
 			__clk_recalc_accuracies(orphan);
 			__clk_recalc_rates(orphan, 0);
+			clk_core_warn_ranges(orphan);
 		}
 	}
 }
