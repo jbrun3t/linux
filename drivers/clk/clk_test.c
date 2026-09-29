@@ -4526,9 +4526,873 @@ static struct kunit_suite clk_protect_reparent_test_suite = {
 	.test_cases = clk_protect_reparent_test_cases,
 };
 
+/* Hold @clk at @rate: its consumer asks for that rate, within a range of it only. */
+static int clk_test_hold(struct clk *clk, unsigned long rate)
+{
+	int ret;
+
+	ret = clk_set_rate(clk, rate);
+	if (ret)
+		return ret;
+
+	return clk_set_rate_range(clk, rate, rate);
+}
+
+#define FORK_PARENT_RATE_1		(120 * HZ_PER_MHZ)
+#define FORK_PARENT_RATE_2		(240 * HZ_PER_MHZ)
+#define FORK_PARENT_RATE_HUGE		(4000 * HZ_PER_MHZ)
+#define FORK_DIV_MIN_RATE		(110 * HZ_PER_MHZ)
+#define FORK_DIV_MAX_RATE		(130 * HZ_PER_MHZ)
+
+/*
+ * Two clocks dividing the same parent:
+ *
+ *		fork-parent
+ *		 /	   \
+ *	  fork-div0	fork-div1
+ *
+ * This is the smallest topology where a rate change asked for on one branch
+ * moves the other one.
+ */
+struct clk_fork_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_div_context div_ctx[2];
+};
+
+static int clk_fork_test_init(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = FORK_PARENT_RATE_1;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("fork-parent",
+							&clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx[0].div = 1;
+	ctx->div_ctx[0].hw.init = CLK_HW_INIT_HW("fork-div0", &ctx->parent_ctx.hw,
+						 &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx[0].hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx[1].div = 1;
+	ctx->div_ctx[1].hw.init = CLK_HW_INIT_HW("fork-div1", &ctx->parent_ctx.hw,
+						 &clk_dummy_div_ops, 0);
+	return clk_hw_register_kunit(test, NULL, &ctx->div_ctx[1].hw);
+}
+
+/*
+ * Test that a clock divides its parent to reach the rate it was asked for,
+ * without disturbing its parent or its sibling.
+ */
+static void clk_fork_test_set_rate_divides(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(div0, FORK_PARENT_RATE_1 / 3);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), FORK_PARENT_RATE_1 / 3);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), FORK_PARENT_RATE_1);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_1);
+}
+
+/*
+ * Test that both children keep their divider when the parent moves, and so
+ * follow it.
+ */
+static void clk_fork_test_parent_drags_children(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(div0, FORK_PARENT_RATE_1 / 3);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), FORK_PARENT_RATE_2 / 3);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_2);
+}
+
+/*
+ * Test that a clock with a range is divided back into it when its parent
+ * moves, while the clock without one follows the parent.
+ */
+static void clk_fork_test_range_keeps_sibling_in_range(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate_range(div1, FORK_DIV_MIN_RATE, FORK_DIV_MAX_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), FORK_PARENT_RATE_2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_2 / 2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), FORK_PARENT_RATE_2);
+}
+
+/*
+ * Test that a clock with a range works its rate out again when its parent
+ * moves, even when following the parent would keep it within its range, and
+ * even when that range is [0, ULONG_MAX].
+ */
+static void clk_fork_test_range_updates_in_range(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(div1, FORK_PARENT_RATE_1 / 2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(div1, 0, ULONG_MAX);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), FORK_PARENT_RATE_2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_1 / 2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), FORK_PARENT_RATE_2);
+}
+
+/*
+ * Test that a rate change taking a clock with a range out of it, with
+ * no divider bringing it back, is refused and leaves the tree alone.
+ */
+static void clk_fork_test_range_refuses_unreachable(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate_range(div1, FORK_DIV_MIN_RATE, FORK_DIV_MAX_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_HUGE);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), FORK_PARENT_RATE_1);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_1);
+}
+
+/* Test that a clock whose range was dropped follows its parent again. */
+static void clk_fork_test_dropped_range_does_not_hold(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate_range(div1, FORK_DIV_MIN_RATE, FORK_DIV_MAX_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_drop_range(div1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), FORK_PARENT_RATE_2);
+}
+
+/*
+ * Test that a clock with a range stays within the limits of its provider
+ * when it is divided back into its consumer's range.
+ */
+static void clk_fork_test_range_keeps_provider_limits(struct kunit *test)
+{
+	struct clk_fork_ctx *ctx = test->priv;
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	/* asked for more than its provider allows */
+	ret = clk_set_rate(div1, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	clk_hw_set_rate_range(&ctx->div_ctx[1].hw, 0, FORK_DIV_MAX_RATE);
+
+	ret = clk_set_rate_range(div1, FORK_DIV_MIN_RATE / 2, FORK_DIV_MAX_RATE * 2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, 3 * FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_GE(test, clk_get_rate(div1), FORK_DIV_MIN_RATE / 2);
+	KUNIT_EXPECT_LE(test, clk_get_rate(div1), FORK_DIV_MAX_RATE);
+}
+
+static struct kunit_case clk_fork_test_cases[] = {
+	KUNIT_CASE(clk_fork_test_set_rate_divides),
+	KUNIT_CASE(clk_fork_test_parent_drags_children),
+	KUNIT_CASE(clk_fork_test_range_keeps_sibling_in_range),
+	KUNIT_CASE(clk_fork_test_range_updates_in_range),
+	KUNIT_CASE(clk_fork_test_range_refuses_unreachable),
+	KUNIT_CASE(clk_fork_test_dropped_range_does_not_hold),
+	KUNIT_CASE(clk_fork_test_range_keeps_provider_limits),
+	{}
+};
+
+/*
+ * Test suite for two dividers sharing a parent.
+ *
+ * These tests exercise what a rate change on one branch does to the other.
+ */
+static struct kunit_suite clk_fork_test_suite = {
+	.name = "clk-fork",
+	.init = clk_fork_test_init,
+	.test_cases = clk_fork_test_cases,
+};
+
+/*
+ * Two gates passing on the rate of a divider, the leaves consumers get:
+ *
+ *	update-parent
+ *	      |
+ *	 update-div
+ *	  /	  \
+ * update-gate0	update-gate1
+ *
+ * A gate has no rate of its own to work out: it asks its divider for it.
+ */
+struct clk_update_gate_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_div_context div_ctx;
+	struct clk_hw gate[2];
+};
+
+static int clk_update_gate_test_init(struct kunit *test)
+{
+	struct clk_update_gate_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = FORK_PARENT_RATE_1;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("update-parent",
+							&clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 1;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("update-div", &ctx->parent_ctx.hw,
+					      &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->gate[0].init = CLK_HW_INIT_HW("update-gate0", &ctx->div_ctx.hw,
+					   &empty_clk_ops, CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->gate[0]);
+	if (ret)
+		return ret;
+
+	ctx->gate[1].init = CLK_HW_INIT_HW("update-gate1", &ctx->div_ctx.hw,
+					   &empty_clk_ops, CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->gate[1]);
+}
+
+/*
+ * Test that a gate with a range gets its rate back when the parent of its
+ * divider moves: the divider is asked for it again, and divides by 4.
+ */
+static void clk_update_gate_test_divider_follows_gate(struct kunit *test)
+{
+	struct clk_update_gate_ctx *ctx = test->priv;
+	struct clk *gate = clk_hw_get_clk_kunit(test, &ctx->gate[0], NULL);
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(gate, FORK_PARENT_RATE_1 / 2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = clk_set_rate_range(gate, 50 * HZ_PER_MHZ, 70 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), FORK_PARENT_RATE_2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), FORK_PARENT_RATE_2 / 4);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(gate), FORK_PARENT_RATE_1 / 2);
+}
+
+/*
+ * Test that the second gate with a range lives with the divider the first
+ * one pinned: it runs at the rate it gets, within its own range.
+ */
+static void clk_update_gate_test_second_gate_lives_with_first(struct kunit *test)
+{
+	struct clk_update_gate_ctx *ctx = test->priv;
+	struct clk *gate0 = clk_hw_get_clk_kunit(test, &ctx->gate[0], NULL);
+	struct clk *gate1 = clk_hw_get_clk_kunit(test, &ctx->gate[1], NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(gate0, FORK_PARENT_RATE_1 / 2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(gate0, 50 * HZ_PER_MHZ, 70 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(gate1, 55 * HZ_PER_MHZ, 65 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, FORK_PARENT_RATE_2);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(gate0), FORK_PARENT_RATE_1 / 2);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(gate1), FORK_PARENT_RATE_1 / 2);
+}
+
+static struct kunit_case clk_update_gate_test_cases[] = {
+	KUNIT_CASE(clk_update_gate_test_divider_follows_gate),
+	KUNIT_CASE(clk_update_gate_test_second_gate_lives_with_first),
+	{}
+};
+
+/*
+ * Test suite for gates with a range under a divider.
+ *
+ * These tests exercise that a clock with no rate of its own to work out gets
+ * the clocks above it asked again when an ancestor moves.
+ */
+static struct kunit_suite clk_update_gate_test_suite = {
+	.name = "clk-update-gate",
+	.init = clk_update_gate_test_init,
+	.test_cases = clk_update_gate_test_cases,
+};
+
+#define WALK_PARENT_INIT_RATE		(200 * HZ_PER_MHZ - 6)
+#define WALK_PARENT_RATE		(200 * HZ_PER_MHZ)
+
+/*
+ * A divider with two branches, walked leaf-div first:
+ *
+ *		walk-parent
+ *		     |
+ *		  walk-div
+ *		  /	  \
+ *	   walk-leaf-div   walk-gate
+ *		|
+ *	    walk-leaf
+ *
+ * walk-div runs at 1e8 - 3 Hz. walk-leaf-div keeps its rate when walk-div
+ * runs at 1e8 Hz instead, but not when walk-gate moves walk-div further.
+ */
+struct clk_walk_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_div_context div_ctx;
+	struct clk_dummy_div_context leaf_div_ctx;
+	struct clk_hw gate;
+	struct clk_hw leaf;
+};
+
+static int clk_walk_test_init(struct kunit *test)
+{
+	struct clk_walk_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = WALK_PARENT_INIT_RATE;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("walk-parent",
+							&clk_dummy_rate_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx.div = 2;
+	ctx->div_ctx.hw.init = CLK_HW_INIT_HW("walk-div", &ctx->parent_ctx.hw,
+					      &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx.hw);
+	if (ret)
+		return ret;
+
+	/* registered before walk-leaf-div, so walked after it */
+	ctx->gate.init = CLK_HW_INIT_HW("walk-gate", &ctx->div_ctx.hw,
+					&empty_clk_ops, CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->gate);
+	if (ret)
+		return ret;
+
+	ctx->leaf_div_ctx.div = 4;
+	ctx->leaf_div_ctx.hw.init = CLK_HW_INIT_HW("walk-leaf-div",
+						   &ctx->div_ctx.hw,
+						   &clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->leaf_div_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->leaf.init = CLK_HW_INIT_HW("walk-leaf", &ctx->leaf_div_ctx.hw,
+					&empty_clk_ops, CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->leaf);
+}
+
+/*
+ * Test that a branch walked before a later one moves its parent is planned
+ * again for the new rate.
+ *
+ * walk-parent goes to 2e8 Hz, taking walk-div to 1e8 Hz, where walk-leaf-div
+ * keeps its rate: nothing below it is worked out again. walk-gate is then out
+ * of its range, and divides walk-div by 3 instead, where walk-leaf-div would
+ * take walk-leaf out of its range. walk-leaf-div has to divide by 3 too.
+ */
+static void clk_walk_test_earlier_branch_planned_again(struct kunit *test)
+{
+	struct clk_walk_ctx *ctx = test->priv;
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *gate = clk_hw_get_clk_kunit(test, &ctx->gate, NULL);
+	struct clk *leaf_div = clk_hw_get_clk_kunit(test, &ctx->leaf_div_ctx.hw,
+						    NULL);
+	struct clk *leaf = clk_hw_get_clk_kunit(test, &ctx->leaf, NULL);
+	unsigned long div_rate = DIV_ROUND_UP(WALK_PARENT_RATE, 3);
+	int ret;
+
+	KUNIT_ASSERT_EQ(test, clk_get_rate(div), 100 * HZ_PER_MHZ - 3);
+	KUNIT_ASSERT_EQ(test, clk_get_rate(leaf), 25 * HZ_PER_MHZ);
+
+	ret = clk_set_rate_range(gate, 60 * HZ_PER_MHZ, 100 * HZ_PER_MHZ - 1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(leaf, 20 * HZ_PER_MHZ, 25 * HZ_PER_MHZ);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(parent, WALK_PARENT_RATE);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), WALK_PARENT_RATE);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div), div_rate);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(gate), div_rate);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(leaf_div), DIV_ROUND_UP(div_rate, 3));
+	KUNIT_EXPECT_EQ(test, clk_get_rate(leaf), DIV_ROUND_UP(div_rate, 3));
+}
+
+static struct kunit_case clk_walk_test_cases[] = {
+	KUNIT_CASE(clk_walk_test_earlier_branch_planned_again),
+	{}
+};
+
+/*
+ * Test suite for the walk of the branches below a moving clock.
+ *
+ * These tests exercise that every branch is planned for the rate its parent
+ * ends up at.
+ */
+static struct kunit_suite clk_walk_test_suite = {
+	.name = "clk-walk",
+	.init = clk_walk_test_init,
+	.test_cases = clk_walk_test_cases,
+};
+
+#define STEP_PARENT_INIT_RATE		(8 * STEP_CLOCK_STEP)
+
+/*
+ * A clock that only produces multiples of a fixed step, the way a PLL with an
+ * integer multiplier does.
+ */
+static int clk_dummy_step_determine_rate(struct clk_hw *hw,
+					 struct clk_rate_request *req)
+{
+	unsigned long steps = max(req->rate / STEP_CLOCK_STEP, 1UL);
+
+	req->rate = steps * STEP_CLOCK_STEP;
+
+	return 0;
+}
+
+static const struct clk_ops clk_dummy_step_ops = {
+	.recalc_rate = clk_dummy_recalc_rate,
+	.determine_rate = clk_dummy_step_determine_rate,
+	.set_rate = clk_dummy_set_rate,
+};
+
+static unsigned long clk_dummy_distance(unsigned long a, unsigned long b)
+{
+	return a > b ? a - b : b - a;
+}
+
+/*
+ * A divider free to ask its parent for a rate that suits it, the way one with
+ * CLK_SET_RATE_PARENT does. It asks through the framework, so what it is told
+ * is what the parent will be, not what it happens to be right now.
+ */
+static int clk_dummy_div_parent_determine_rate(struct clk_hw *hw,
+					       struct clk_rate_request *req)
+{
+	struct clk_hw *parent = clk_hw_get_parent(hw);
+	unsigned long best = 0, best_parent_rate = 0;
+	unsigned int div;
+
+	for (div = 1; div <= DUMMY_DIV_MAX; div++) {
+		unsigned long parent_rate, rate;
+
+		if (req->rate > ULONG_MAX / div)
+			break;
+
+		parent_rate = clk_hw_round_rate(parent, req->rate * div);
+		if (!parent_rate)
+			continue;
+
+		rate = DIV_ROUND_UP(parent_rate, div);
+
+		if (rate < req->min_rate || rate > req->max_rate)
+			continue;
+
+		if (best && clk_dummy_distance(rate, req->rate) >=
+			    clk_dummy_distance(best, req->rate))
+			continue;
+
+		best = rate;
+		best_parent_rate = parent_rate;
+	}
+
+	if (!best)
+		return -EINVAL;
+
+	req->rate = best;
+	req->best_parent_rate = best_parent_rate;
+
+	return 0;
+}
+
+static const struct clk_ops clk_dummy_div_parent_ops = {
+	.recalc_rate = clk_dummy_div_recalc_rate,
+	.determine_rate = clk_dummy_div_parent_determine_rate,
+	.set_rate = clk_dummy_div_set_rate,
+};
+
+/*
+ * Two dividers that can each drive their parent, under a clock that only
+ * produces multiples of a fixed step:
+ *
+ *		step-parent
+ *		 /	    \
+ *	  step-div0	step-div1
+ *
+ * Every parent rate one of them asks for is one the other has to live with.
+ */
+struct clk_step_ctx {
+	struct clk_dummy_context parent_ctx;
+	struct clk_dummy_div_context div_ctx[2];
+};
+
+static int clk_step_test_init(struct kunit *test)
+{
+	struct clk_step_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->parent_ctx.rate = STEP_PARENT_INIT_RATE;
+	ctx->parent_ctx.hw.init = CLK_HW_INIT_NO_PARENT("step-parent",
+							&clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->parent_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx[0].div = 1;
+	ctx->div_ctx[0].hw.init = CLK_HW_INIT_HW("step-div0", &ctx->parent_ctx.hw,
+						 &clk_dummy_div_parent_ops,
+						 CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_ctx[0].hw);
+	if (ret)
+		return ret;
+
+	ctx->div_ctx[1].div = 1;
+	ctx->div_ctx[1].hw.init = CLK_HW_INIT_HW("step-div1", &ctx->parent_ctx.hw,
+						 &clk_dummy_div_parent_ops,
+						 CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->div_ctx[1].hw);
+}
+
+/*
+ * Test that a divider free to drive its parent gets the rate it asks for, by
+ * moving the parent to a multiple of it.
+ */
+static void clk_step_test_set_rate_moves_parent(struct kunit *test)
+{
+	struct clk_step_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_set_rate(div0, STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), STEP_CLOCK_STEP);
+}
+
+/*
+ * Test that a held clock keeps its rate when the other branch drives the
+ * parent somewhere else, by dividing the new parent rate.
+ */
+static void clk_step_test_held_clock_keeps_its_rate(struct kunit *test)
+{
+	struct clk_step_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_test_hold(div0, STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(div1, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div0), STEP_CLOCK_STEP);
+}
+
+/*
+ * Test that a rate only reachable by moving the parent somewhere a held clock
+ * cannot follow is refused, and that nothing moves. 1MHz needs the parent at
+ * 16MHz, and div1 cannot divide that into 32MHz.
+ */
+static void clk_step_test_held_clock_refuses_search(struct kunit *test)
+{
+	struct clk_step_ctx *ctx = test->priv;
+	struct clk *div0 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[0].hw, NULL);
+	struct clk *div1 = clk_hw_get_clk_kunit(test, &ctx->div_ctx[1].hw, NULL);
+	struct clk *parent = clk_hw_get_clk_kunit(test, &ctx->parent_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_test_hold(div1, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate_range(div0, HZ_PER_MHZ, HZ_PER_MHZ);
+	KUNIT_EXPECT_EQ(test, ret, -EBUSY);
+
+	KUNIT_EXPECT_EQ(test, clk_get_rate(parent), 2 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div1), 2 * STEP_CLOCK_STEP);
+}
+
+static struct kunit_case clk_step_test_cases[] = {
+	KUNIT_CASE(clk_step_test_set_rate_moves_parent),
+	KUNIT_CASE(clk_step_test_held_clock_keeps_its_rate),
+	KUNIT_CASE(clk_step_test_held_clock_refuses_search),
+	{}
+};
+
+/*
+ * Test suite for two dividers competing for one parent.
+ *
+ * These tests exercise what a clock with a range does to the rates the rest
+ * of the tree can reach.
+ */
+static struct kunit_suite clk_step_test_suite = {
+	.name = "clk-step",
+	.init = clk_step_test_init,
+	.test_cases = clk_step_test_cases,
+};
+
+/*
+ * A mux that can move from a fixed clock to a divider that has to move to
+ * serve it, and a held clock on that divider:
+ *
+ *	fixed		   pll
+ *	  |		    |
+ *	  |		  div-b (CLK_SET_RATE_PARENT)
+ *	  |		 /	\
+ *	  `-- mux ------'	 div-s (held)
+ */
+struct clk_moving_parent_ctx {
+	struct clk_dummy_context fixed_ctx;
+	struct clk_dummy_context pll_ctx;
+	struct clk_dummy_div_context div_b_ctx;
+	struct clk_dummy_div_context div_s_ctx;
+	struct clk_multiple_parent_ctx mux_ctx;
+};
+
+static const struct clk_ops clk_dummy_fixed_ops = {
+	.recalc_rate = clk_dummy_recalc_rate,
+};
+
+static const struct clk_ops clk_moving_parent_mux_ops = {
+	.get_parent = clk_multiple_parents_mux_get_parent,
+	.set_parent = clk_multiple_parents_mux_set_parent,
+	.determine_rate = __clk_mux_determine_rate_closest,
+};
+
+static int clk_moving_parent_test_init(struct kunit *test)
+{
+	const char *parents[2] = { "moving-fixed", "moving-div-b" };
+	struct clk_moving_parent_ctx *ctx;
+	int ret;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	if (!ctx)
+		return -ENOMEM;
+	test->priv = ctx;
+
+	ctx->fixed_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->fixed_ctx.hw.init = CLK_HW_INIT_NO_PARENT("moving-fixed",
+						       &clk_dummy_fixed_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->fixed_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->pll_ctx.rate = 2 * STEP_CLOCK_STEP;
+	ctx->pll_ctx.hw.init = CLK_HW_INIT_NO_PARENT("moving-pll",
+						     &clk_dummy_step_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->pll_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_b_ctx.div = 1;
+	ctx->div_b_ctx.hw.init = CLK_HW_INIT_HW("moving-div-b", &ctx->pll_ctx.hw,
+						&clk_dummy_div_parent_ops,
+						CLK_SET_RATE_PARENT);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_b_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->div_s_ctx.div = 1;
+	ctx->div_s_ctx.hw.init = CLK_HW_INIT_HW("moving-div-s", &ctx->div_b_ctx.hw,
+						&clk_dummy_div_ops, 0);
+	ret = clk_hw_register_kunit(test, NULL, &ctx->div_s_ctx.hw);
+	if (ret)
+		return ret;
+
+	ctx->mux_ctx.current_parent = 0;
+	ctx->mux_ctx.hw.init = CLK_HW_INIT_PARENTS("moving-mux", parents,
+						   &clk_moving_parent_mux_ops,
+						   CLK_SET_RATE_PARENT);
+	return clk_hw_register_kunit(test, NULL, &ctx->mux_ctx.hw);
+}
+
+/*
+ * Test that the clocks dragged along by the parent a clock moves to are kept
+ * in their range, not those of the parent it leaves.
+ */
+static void clk_moving_parent_test_new_parent_branch_held(struct kunit *test)
+{
+	struct clk_moving_parent_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *div_s = clk_hw_get_clk_kunit(test, &ctx->div_s_ctx.hw, NULL);
+	int ret;
+
+	ret = clk_test_hold(div_s, 2 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_rate(mux, 4 * STEP_CLOCK_STEP);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	KUNIT_EXPECT_PTR_EQ(test, clk_hw_get_parent(&ctx->mux_ctx.hw),
+			    &ctx->div_b_ctx.hw);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(mux), 4 * STEP_CLOCK_STEP);
+	KUNIT_EXPECT_EQ(test, clk_get_rate(div_s), 2 * STEP_CLOCK_STEP);
+}
+
+static struct kunit_case clk_moving_parent_test_cases[] = {
+	KUNIT_CASE(clk_moving_parent_test_new_parent_branch_held),
+	{}
+};
+
+/*
+ * Test suite for a clock moving to a parent that has to move to serve it.
+ *
+ * These tests exercise that a rate change reaching the tree through a new
+ * parent keeps the clocks it drags along there in their range.
+ */
+static struct kunit_suite clk_moving_parent_test_suite = {
+	.name = "clk-moving-parent",
+	.init = clk_moving_parent_test_init,
+	.test_cases = clk_moving_parent_test_cases,
+};
+
+/*
+ * Test that a clock keeps its range when it is moved under another parent,
+ * both through the parent switch itself and through a later rate change of
+ * that new parent.
+ */
+static void clk_range_reparent_test_range_follows_the_clock(struct kunit *test)
+{
+	struct clk_req_rate_ctx *ctx = test->priv;
+	struct clk *mux = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.hw, NULL);
+	struct clk *div = clk_hw_get_clk_kunit(test, &ctx->div_ctx.hw, NULL);
+	struct clk *p1 = clk_hw_get_clk_kunit(test, &ctx->mux_ctx.parents_ctx[1].hw,
+					      NULL);
+	unsigned long min_rate = DUMMY_CLOCK_RATE_1 - 42 * HZ_PER_MHZ;
+	unsigned long max_rate = DUMMY_CLOCK_RATE_1 + 8 * HZ_PER_MHZ;
+	int ret;
+
+	ret = clk_set_rate_range(div, min_rate, max_rate);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+
+	ret = clk_set_parent(mux, p1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_GE(test, clk_get_rate(div), min_rate);
+	KUNIT_EXPECT_LE(test, clk_get_rate(div), max_rate);
+
+	ret = clk_set_rate(p1, 3 * DUMMY_CLOCK_RATE_1);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_GE(test, clk_get_rate(div), min_rate);
+	KUNIT_EXPECT_LE(test, clk_get_rate(div), max_rate);
+}
+
+static struct kunit_case clk_range_reparent_test_cases[] = {
+	KUNIT_CASE(clk_range_reparent_test_range_follows_the_clock),
+	{}
+};
+
+/*
+ * Test suite for a clock with a range below a mux.
+ *
+ * These tests exercise that a clock is kept in its range wherever the tree
+ * puts it.
+ */
+static struct kunit_suite clk_range_reparent_test_suite = {
+	.name = "clk-range-reparent",
+	.init = clk_req_rate_test_init,
+	.test_cases = clk_range_reparent_test_cases,
+};
+
 kunit_test_suites(
 	&clk_assigned_rates_suite,
 	&clk_assigned_sscs_suite,
+	&clk_fork_test_suite,
 	&clk_hw_get_dev_of_node_test_suite,
 	&clk_parse_clkspec_test_suite,
 	&clk_leaf_mux_set_rate_parent_test_suite,
@@ -4536,10 +5400,13 @@ kunit_test_suites(
 	&clk_multiple_parents_mux_test_suite,
 	&clk_mux_no_reparent_test_suite,
 	&clk_mux_notifier_test_suite,
+	&clk_moving_parent_test_suite,
 	&clk_orphan_transparent_multiple_parent_mux_test_suite,
 	&clk_orphan_transparent_single_parent_test_suite,
 	&clk_pass_through_test_suite,
+	&clk_range_reparent_test_suite,
 	&clk_protect_reparent_test_suite,
+	&clk_step_test_suite,
 	&clk_orphan_two_level_root_last_test_suite,
 	&clk_range_test_suite,
 	&clk_range_maximize_test_suite,
@@ -4550,6 +5417,8 @@ kunit_test_suites(
 	&clk_single_parent_mux_test_suite,
 	&clk_switch_test_suite,
 	&clk_uncached_test_suite,
+	&clk_update_gate_test_suite,
+	&clk_walk_test_suite,
 );
 MODULE_DESCRIPTION("Kunit tests for clk framework");
 MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");

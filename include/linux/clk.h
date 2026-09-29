@@ -932,9 +932,24 @@ bool clk_has_parent(const struct clk *clk, const struct clk *parent);
  * @min: desired minimum clock rate in Hz, inclusive
  * @max: desired maximum clock rate in Hz, inclusive
  *
+ * From then on, the clock is kept within the range: when a change elsewhere in
+ * the tree moves its parents, its rate is worked out again, and a change that
+ * cannot keep it in range is refused. This holds, through later range calls,
+ * until clk_drop_range() or the release of @clk.
+ *
  * Returns success (0) or negative errno.
  */
 int clk_set_rate_range(struct clk *clk, unsigned long min, unsigned long max);
+
+/**
+ * clk_drop_range - Reset any range set on that clock
+ * @clk: clock source
+ *
+ * The clock is no longer kept within a range when its parents move.
+ *
+ * Returns success (0) or negative errno.
+ */
+int clk_drop_range(struct clk *clk);
 
 /**
  * clk_set_min_rate - set a minimum clock rate for a clock source
@@ -1157,6 +1172,11 @@ static inline int clk_set_rate_range(struct clk *clk, unsigned long min,
 	return 0;
 }
 
+static inline int clk_drop_range(struct clk *clk)
+{
+	return 0;
+}
+
 static inline int clk_set_min_rate(struct clk *clk, unsigned long rate)
 {
 	return 0;
@@ -1226,17 +1246,6 @@ static inline void clk_bulk_disable_unprepare(int num_clks,
 {
 	clk_bulk_disable(num_clks, clks);
 	clk_bulk_unprepare(num_clks, clks);
-}
-
-/**
- * clk_drop_range - Reset any range set on that clock
- * @clk: clock source
- *
- * Returns success (0) or negative errno.
- */
-static inline int clk_drop_range(struct clk *clk)
-{
-	return clk_set_rate_range(clk, 0, ULONG_MAX);
 }
 
 /**
